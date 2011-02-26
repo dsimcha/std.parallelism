@@ -256,7 +256,16 @@ template ElementsCompatible(R, A) {
 }
 
 /**
-The task pool class that is the workhorse of this library.
+This class encapsulates a task queue and a set of worker threads.  The worker
+threads pop tasks off the front of the queue and complete them, sleeping when
+no tasks are available.
+
+This class should usually be used via the default global instantiation,
+available via the global $(D taskPool) property, which is described below.
+Occasionally it may be useful to explicitly instantiate a $(D TaskPool) object,
+for example when the threads in the global task pool are blocked waiting for
+some code to execute, and you want to parallelize the code that these threads
+are waiting on.
  */
 final class TaskPool {
 private:
@@ -497,8 +506,8 @@ private:
 public:
 
     /**
-    Default constructor that initializes a TaskPool with
-    however many cores are on your CPU, minus 1 because the thread
+    Default constructor that initializes a $(D TaskPool) with
+    $(core.cpuid.coresPerCPU), minus 1 because the thread
     that initialized the pool will also do work.
 
     BUGS:  Will initialize with the wrong number of threads in cases were
@@ -539,14 +548,13 @@ public:
 
     /**
     Implements a parallel foreach loop over a range.  blockSize is the
-    number of elements to process in one work unit.
+    number of elements to process in one work unit, i.e. in a single thread,
+    as a single task.
 
     Examples:
     ---
-    auto pool = new TaskPool();
-
     uint[] squares = new uint[1_000];
-    foreach(i; pool.parallel( iota(squares.length), 100)) {
+    foreach(i; taskPool.parallel( iota(squares.length), 100)) {
         // Iterate over squares using work units of size 100.
         squares[i] = i * i;
     }
@@ -573,7 +581,7 @@ public:
     foreach is executed over an $(D AsyncBuf) or $(D LazyMap), the copying is
     elided and the buffers are simply swapped.  However, note that in this case
     the $(D blockSize) parameter of this function will be ignored and the
-    work unit size will be set to the block size of the $(D AsyncBuf) or
+    work unit size will be set to the buffer size of the $(D AsyncBuf) or
     $(D LazyMap).
      */
     ParallelForeach!R parallel(R)(R range, size_t blockSize) {
@@ -604,33 +612,31 @@ public:
     Eager parallel map.  $(D functions) are the functions to be evaluated.
     The first argument must be a random access range.  Immediately after the
     range argument, an optional block size argument may be provided.  If none
-    is provided, the default block size is used.  An optional buffer may be
-    provided as the last argument.  If one is not provided, one will
-    be automatically allocated.  If one is provided, it must be the same
-    length as the range.
+    is provided, the default block size is used.  An optional buffer for
+    returining the results may be provided as the last argument.
+    If one is not provided, one will be automatically allocated.  If one is
+    provided, it must be the same length as the range.
 
     Examples:
     ---
-    auto pool = new TaskPool();
-
     real[] numbers = new real[1_000];
     foreach(i, ref num; numbers) {
         num = i;
     }
 
     // Find the squares of numbers[].
-    real[] squares = pool.map!"a * a"(numbers);
+    real[] squares = taskPool.map!"a * a"(numbers);
 
     // Same thing, but make work units explicitly of size 100.
-    real[] squares = pool.map!"a * a"(numbers, 100);
+    real[] squares = taskPool.map!"a * a"(numbers, 100);
 
     // Same thing, but explicitly pre-allocate a buffer.
     auto squares = new real[numbers.length];
-    pool.map!"a * a"(numbers, squares);
+    taskPool.map!"a * a"(numbers, squares);
 
     // Multiple functions, explicit buffer, and explicit block size.
     auto results = new Tuple!(real, real)[numbers.length];
-    pool.map!("a * a", "-a")(numbers, 100, results);
+    taskPool.map!("a * a", "-a")(numbers, 100, results);
     ---
      */
     template map(functions...) {
@@ -755,7 +761,7 @@ public:
     with the second buffer and filled while the values from what was originally
     the second buffer are read.  This can be used for pipelining.
 
-    Parameters;
+    Parameters:
 
     range:  The range to be mapped.  This must be an input range, though it
     should preferably be a random access range to avoid needing to buffer
@@ -799,6 +805,8 @@ public:
     ---
     */
     template lazyMap(functions...) {
+
+        ///
         LazyMap!(functions).LazyMap!(R)
         lazyMap(R)(R range, size_t bufSize = 100, size_t blockSize = size_t.max)
         if(isInputRange!R) {
@@ -812,7 +820,7 @@ public:
     /**
     Given an input range that is expensive to iterate over, returns an
     $(D AsyncBuf) object that asynchronously buffers the contents of
-    $(D range) into a buffer of $(D bufSize) elements a background thread,
+    $(D range) into a buffer of $(D bufSize) elements in a worker thread,
     while making prevously buffered elements from a second buffer, also of size
     $(D bufSize), available via the range interface of the $(D AsyncBuf)
     object.  This is useful, for ecample, when performing expensive operations
@@ -841,24 +849,20 @@ public:
     may optionally be provided as the second argument.
 
     Note:  Because this operation is being carried out in parallel,
-    fun must be associative.  For notational simplicity, let # be an
-    infix operator representing fun.  Then, (a # b) # c must equal
-    a # (b # c).  This is NOT the same thing as commutativity.  Matrix
+    $(D fun) must be associative.  For notational simplicity, let # be an
+    infix operator representing $(D fun).  Then, (a # b) # c must equal
+    a # (b # c).  This is not the same thing as commutativity.  Matrix
     multiplication, for example, is associative but not commutative.
 
     Examples:
     ---
-    // Find the max of an array in parallel.  Note that this is a toy example
-    // and unless the comparison function was very expensive, it would
-    // almost always be faster to do this in serial.
+    // Find the sum of squares of an array in parallel.
 
-    auto pool = new TaskPool();
+    auto myArr = array(iota(100_000));
+    auto myMax = taskPool.reduce!"a + b * b"(myArr);
 
-    auto myArr = somethingExpensiveToCompare();
-    auto myMax = pool.reduce!max(myArr);
-
-    // Find both the min and max.
-    auto minMax = pool.reduce!(min, max)(myArr);
+    // Find both the min and max of myArr.
+    auto minMax = taskPool.reduce!(min, max)(myArr);
     assert(minMax.field[0] == reduce!min(myArr));
     assert(minMax.field[1] == reduce!max(myArr));
     ---
@@ -991,13 +995,13 @@ public:
     /**
     Gets the index of the current thread relative to this pool.  Any thread
     not in this pool will receive an index of 0.  The worker threads in
-    this pool receive indices of 1 through poolSize.
+    this pool receive indices of 1 through $(D this.size()).
 
     The worker index is useful mainly for maintaining worker-local storage.
 
-    BUGS:  Subject to integer overflow errors if more than size_t.max threads
-           are ever created during the course of a program's execution.  This
-           will likely never be fixed because it's an extreme corner case
+    BUGS:  Subject to integer overflow errors if more than size_t.max worker
+           threads are ever created during the course of a program's execution.
+           This will likely never be fixed because it's an extreme corner case
            on 32-bit and it's completely implausible on 64-bit.
      */
     size_t workerIndex() {
@@ -1011,6 +1015,12 @@ public:
     Create an instance of worker-local storage, initialized with a given
     value.  The value is $(D lazy) so that you can, for example, easily
     create one instance of a class for each worker.
+
+    Examples:
+    ---
+    // Create a temporary buffer of size 1,000 for each worker thread.
+    auto bufs = taskPool.createWorkerLocal(new uint[1_000]);
+    ---
      */
     WorkerLocal!(T) createWorkerLocal(T)(lazy T initialVal = T.init) {
         WorkerLocal!(T) ret;
@@ -1023,10 +1033,10 @@ public:
     }
 
     /**
-    Kills pool immediately w/o waiting for jobs to finish.  Use only if you
+    Kills the pool immediately w/o waiting for jobs to finish.  Use only if you
     have waitied on every job and therefore know there can't possibly be more
-    in queue, or if you speculatively executed a bunch of stuff and realized
-    you don't need those results anymore.
+    in queue, or if you speculatively executed some tasks and no longer need
+    the results.
 
     Note:  Does not affect jobs that are already executing, only those
     in queue.
@@ -1047,7 +1057,7 @@ public:
     }
 
     /**
-    Instructs worker threads to stop when the queue becomes empty, but does
+    Instructs worker threads to terminate when the queue becomes empty, but does
     not block.
      */
     void finish() @trusted {
@@ -1064,25 +1074,15 @@ public:
         return cast(uint) pool.length;
     }
 
-    // Kept public for backwards compatibility, but not documented.
-    // Using ref parameters is a nicer API and is made safe because the
-    // d'tor for Task waits until the task is finished before destroying the
-    // stack frame.  This function will eventually be made private and/or
-    // deprecated.
-    void put(alias fun, Args...)(Task!(fun, Args)* task) {
-        task.pool = this;
-        abstractPut( cast(AbstractTask*) task);
-    }
-
     /**
-    Put a task on the queue.
+    Put a $(D Task) object on the queue.
 
     Note:  While this function takes the address of variables that may
-    potentially be on the stack, it is safe marked as @trusted.  Task objects
-    include a destructor that waits for the task to complete before destroying
-    the stack frame that they are allocated on.  Therefore, it is impossible
-    for the stack frame to be destroyed before the task is complete and out
-    of the queue.
+    potentially be on the stack, it is safe and marked as @trusted.  $(D Task)
+    objects include a destructor that waits for the task to complete before
+    destroying the stack frame that they are allocated on.  Therefore, it is
+    impossible for the stack frame to be destroyed before the task is complete
+    and out of the queue.
     */
     void put(alias fun, Args...)(ref Task!(fun, Args) task) @trusted {
         task.pool = this;
@@ -1115,37 +1115,37 @@ public:
     }
 
     /**
-    Convenience method that automatically creates a Task calling an alias on
-    the GC heap and submits it to the pool.  See examples for the
-    non-member function task().
+    Convenience method that automatically creates a $(D Task) calling an alias
+    on the GC heap and submits it to the pool.  See examples for the
+    non-member function $(D task()).
 
     Returns:  A pointer to the Task object.
      */
     Task!(fun, Args)* task(alias fun, Args...)(Args args) {
         auto stuff = .task!(fun)(args);
         auto ret = moveToHeap(stuff);
-        put(ret);
+        put(*ret);
         return ret;
     }
 
     /**
-    Convenience method that automatically creates a Task calling a delegate,
+    Convenience method that automatically creates a $(D Task) calling a delegate,
     function pointer, or functor on the GC heap and submits it to the pool.
-    See examples for the non-member function task().
+    See examples for the non-member function $(D task()).
 
-    Returns:  A pointer to the Task object.
+    Returns:  A pointer to the $(D Task) object.
 
     Note:  This function takes a non-scope delegate, meaning it can be
     used with closures.  If you can't allocate a closure due to objects
     on the stack that have scoped destruction, see the global function
-    task(), which takes a scope delegate.
+    $(D task()), which takes a scope delegate.
      */
      Task!(run, TypeTuple!(F, Args))*
      task(F, Args...)(F delegateOrFp, Args args)
      if(is(ReturnType!(F))) {
          auto stuff = .task(delegateOrFp, args);
          auto ptr = moveToHeap(stuff);
-         put(ptr);
+         put(*ptr);
          return ptr;
      }
 }
@@ -1153,7 +1153,11 @@ public:
 /**
 Returns a lazily initialized default instantiation of $(D TaskPool).
 This function can safely be called concurrently from multiple non-worker
-threads.  One instance is shared across the entire program.
+threads.  The worker threads in this pool are daemon threads, meaning that it
+is not necessary to explicitly call $(D taskPool.join()), $(D taskPool.stop())
+or $(D taskPool.finish()) before terminating the main thread.
+
+One instance of this pool is shared across the entire program.
 */
  @property TaskPool taskPool() @trusted {
     static bool initialized;
@@ -1220,13 +1224,13 @@ ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
 A struct that encapsulates the information about a task, including
 its current status, what pool it was submitted to, and its arguments.
 
-Notes:  If a Task has been submitted to the pool, is being stored in a stack
-frame, and has not yet finished, the destructor for this struct will
-automatically call yieldWait() so that the task can finish and the
+Notes:  If a $(D Task) has been submitted to the pool, is being stored in a
+stack frame, and has not yet finished, the destructor for this struct will
+automatically call $(D yieldWait()) so that the task can finish and the
 stack frame can be destroyed safely.
 
-Function results are returned from $(D yieldWait) and friends by ref.  If
-$(D fun) returns by ref, the reference will point directly to the return
+Function results are returned from $(D yieldWait()) and friends by ref.  If
+$(D fun) returns by ref, the reference will point directly to the returned
 reference of $(D fun).  Otherwise it will point to a field in this struct.
 
 Copying of this struct is disabled, since it would provide no useful semantics.
@@ -1305,7 +1309,8 @@ struct Task(alias fun, Args...) {
     /**
     If the task isn't started yet, execute it in the current thread.
     If it's done, return its return value, if any.  If it's in progress,
-    busy spin until it's done, then return the return value.
+    busy spin until it's done, then return the return value.  If it threw
+    an exception, rethrow that exception.
 
     This function should be used when you expect the result of the
     task to be available relatively quickly, on a timescale shorter
@@ -1330,7 +1335,8 @@ struct Task(alias fun, Args...) {
     /**
     If the task isn't started yet, execute it in the current thread.
     If it's done, return its return value, if any.  If it's in progress,
-    wait on a condition variable.
+    wait on a condition variable.  If it threw an exception, rethrow that
+    exception.
 
     This function should be used when you expect the result of the
     task to take a while, as waiting on a condition variable
@@ -1368,7 +1374,8 @@ struct Task(alias fun, Args...) {
     If this task is not started yet, execute it in the current
     thread.  If it is finished, return its result.  If it is in progress,
     execute any other available tasks from the task pool until this one
-    is finished.  If no other tasks are available, yield wait.
+    is finished.  If it threw an exception, rethrow that exception.
+    If no other tasks are available, yield wait.
      */
     @property ref ReturnType workWait() @trusted {
         enforcePool();
@@ -1419,7 +1426,7 @@ struct Task(alias fun, Args...) {
         }
     }
 
-    ///
+    ///  Returns true if the task is finished executing.
     @property bool done() @trusted {
         // Explicitly forwarded for documentation purposes.
         return Base.done();
@@ -1441,12 +1448,11 @@ Creates a task that calls an alias.
 
 Examples:
 ---
-auto pool = new TaskPool();
 uint[] foo = [1, 2, 3, 4, 5];
 
 // Create a task to sum this array in the background.
 auto myTask = task!( reduce!"a + b" )(foo);
-pool.put(myTask);
+taskPool.put(myTask);
 
 // Do other stuff.
 
@@ -1469,15 +1475,14 @@ Task!(fun, Args) task(alias fun, Args...)(Args args) {
 
 /**
 Create a task that calls a function pointer, delegate, or functor.
-This works for anonymous delegates.
+This works even for anonymous delegates.
 
 Examples:
 ---
-auto pool = new TaskPool();
 auto myTask = task({
     stderr.writeln("I've completed a task.");
 });
-pool.put(myTask);
+taskPool.put(myTask);
 
 // Do other stuff.
 
@@ -1494,7 +1499,8 @@ allocate and automatically submit to the pool, see $(D TaskPool.task()).
 In the case of delegates, this function takes a $(D scope) delegate to prevent
 the allocation of closures, since its intended use is for tasks that will
 be finished before the function in which they're created returns.
-pool.task() takes a non-scope delegate and will allow the use of closures.
+$(D TaskPool.task()) takes a non-scope delegate and will allow the use of
+closures.
  */
 Task!(run, TypeTuple!(F, Args))
 task(F, Args...)(scope F delegateOrFp, Args args)
@@ -1513,7 +1519,8 @@ restrictions:
 
 2.  $(D Args) must not have unshared aliasing.
 
-3.  The return type must not have unshared aliasing unless $(D fun) is pure.
+3.  The return type must not have unshared aliasing unless $(D fun) is weakly
+    pure.
 
 4.  $(D fun) must return by value, not by reference.
 */
@@ -1903,7 +1910,7 @@ template LazyMap(functions...) {
 
 /**
 Asynchronously buffers an expensive-to-iterate range using a background thread
-from a task pool.  For details see TaskPool.asyncBuf.
+from a task pool.  For details see $(D TaskPool.asyncBuf).
 */
 final class AsyncBuf(R) if(isInputRange!R) {
     // This is a class because the task and the range both need to be on the
@@ -2038,11 +2045,11 @@ to each thread for only the parallel portion of an algorithm.
 
 Examples:
 ---
-auto pool = new TaskPool;
-auto sumParts = pool.createWorkerLocal!(uint)();
-foreach(i; pool.parallel(iota(someLargeNumber))) {
-    // Do complicated stuff.
-    sumParts.get += resultOfComplicatedStuff;
+// Find the sum of squares of a range in parallel, using an imperative rather
+// than functional programming style.
+auto sumParts = taskPool.createWorkerLocal!(uint)();
+foreach(i; taskPool.parallel(iota(1_000_000UL))) {
+    sumParts.get += i * i;
 }
 
 writeln("Sum = ", reduce!"a + b"(sumParts.toRange));
@@ -2154,7 +2161,7 @@ public:
     /**
     Returns a range view of the values for all threads, which can be used
     to do stuff with the results of each thread after running the parallel
-    part of your algorithm.  Do NOT use this method in the parallel portion
+    part of your algorithm.  Do not use this method in the parallel portion
     of your algorithm.
 
     Calling this function will also set a flag indicating
@@ -2178,7 +2185,7 @@ public:
 Range primitives for worker-local storage.  The purpose of this is to
 access results produced by each worker thread from a single thread once you
 are no longer using the worker-local storage from multiple threads.
-Do NOT use this struct in the parallel portion of your algorithm.
+Do not use this struct in the parallel portion of your algorithm.
  */
 struct WorkerLocalRange(T) {
 private:
@@ -2894,5 +2901,3 @@ version(parallelismStressTest) {
         }
     }
 }
-
-void main() {}
