@@ -1,7 +1,7 @@
 /**
 $(D std.parallelism) is a library that implements some high-level primitives
 for shared memory SMP parallelism.  These include parallel foreach, parallel
-reduce, parallel eager map and basic task parallelism primitives.
+reduce, parallel eager map, pipelining and basic task parallelism primitives.
 
 This module is geared towards parallelism, not concurrency.  In particular,
 the default behavior on single-core machines is to use no multithreading at
@@ -17,7 +17,6 @@ Warning:  Most of this module completely subverts D's type system to achieve
 
 Author:  David Simcha
 Copyright:  Copyright (c) 2009-2010, David Simcha.
-License:    $(WEB boost.org/LICENSE_1_0.txt, Boost License 1.0)
 License:    $(WEB boost.org/LICENSE_1_0.txt, Boost License 1.0)
 */
 module std.parallelism;
