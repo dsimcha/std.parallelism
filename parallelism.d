@@ -18,6 +18,7 @@ Warning:  Most of this module completely subverts D's type system to achieve
 Author:  David Simcha
 Copyright:  Copyright (c) 2009-2010, David Simcha.
 License:    $(WEB boost.org/LICENSE_1_0.txt, Boost License 1.0)
+License:    $(WEB boost.org/LICENSE_1_0.txt, Boost License 1.0)
 */
 module std.parallelism;
 
@@ -1792,9 +1793,9 @@ template LazyMap(functions...) {
         }
 
         this(R range, size_t bufSize, size_t blockSize, TaskPool pool) {
-            static if(is(typeof(range.bufSize)) &&
+            static if(is(typeof(range.buf1)) && is(typeof(range.bufPos)) &&
             is(typeof(range.doBufSwap()))) {
-                bufSize = range.bufSize;
+                bufSize = range.buf1.length;
             }
 
             buf1.length = bufSize;
