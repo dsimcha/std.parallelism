@@ -9,7 +9,7 @@ fairly simple, readable code, not to write the fastest matrix inversion
 routine humanly possible.
 */
 import std.algorithm, std.stdio, std.math, std.datetime, std.parallelism,
-    std.range, std.random, std.getopt;
+    std.range, std.random, std.getopt, core.memory;
 
 enum Parallel : bool {
     yes = true,
@@ -19,7 +19,7 @@ enum Parallel : bool {
 // n by n matrix.  Smaller n's seem to be too fine-grained.  Larger n's seem
 // to bottleneck on memory bandwidth.  At n=256, speedups are close to linear,
 // at least for 2 cores.
-enum n = 256;
+enum n = 1024;
 
 void invert(Parallel parallel)(float[][] from, float[][] to) {
     // Normalize.  This is probably not worth parallelizing.
