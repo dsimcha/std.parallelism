@@ -5,11 +5,18 @@ done in single precision to avoid artifacts due to stack alignment on 32-bit
 architectures.
 */
 
-import std.stdio, std.algorithm, std.parallelism, std.random, std.datetime;
+import std.stdio, std.algorithm, std.parallelism, std.random, std.datetime,
+    std.getopt;
 
 enum nIter = 1000;
 
-void main() {
+void main(string[] args) {
+    uint nCpu = uint.max;
+    getopt(args, "nCpu", &nCpu);
+    if(nCpu < uint.max && nCpu > 0) {
+        defaultPoolThreads = nCpu - 1;
+    }
+
     auto arr = new float[250_000];
     foreach(ref elem; arr) elem = uniform(-0.5, 0.5);
 

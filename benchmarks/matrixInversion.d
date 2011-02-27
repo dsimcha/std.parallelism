@@ -9,7 +9,7 @@ fairly simple, readable code, not to write the fastest matrix inversion
 routine humanly possible.
 */
 import std.algorithm, std.stdio, std.math, std.datetime, std.parallelism,
-    std.range, std.random;
+    std.range, std.random, std.getopt;
 
 enum Parallel : bool {
     yes = true,
@@ -79,7 +79,13 @@ float[][] randMatrix() {
     return ret;
 }
 
-void main() {
+void main(string[] args) {
+    uint nCpu = uint.max;
+    getopt(args, "nCpu", &nCpu);
+    if(nCpu < uint.max && nCpu > 0) {
+        defaultPoolThreads = nCpu - 1;
+    }
+
     auto toMatrix = new float[][](n, n);
     auto serialFrom = randMatrix();
 

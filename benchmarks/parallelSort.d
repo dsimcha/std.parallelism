@@ -6,7 +6,7 @@ recursive call instead of simply executing it in serial.
 */
 
 import std.stdio, std.datetime, std.parallelism, std.random, std.exception,
-    std.algorithm;
+    std.algorithm, std.getopt;
 
 // Minimum size of subproblem to parallelize.
 enum minParallel = 64;
@@ -113,7 +113,13 @@ string randString() {
 
 enum nIter = 1_000;
 
-void main() {
+void main(string[] args) {
+    uint nCpu = uint.max;
+    getopt(args, "nCpu", &nCpu);
+    if(nCpu < uint.max && nCpu > 0) {
+        defaultPoolThreads = nCpu - 1;
+    }
+
     auto strings = new string[10_000];
     foreach(ref s; strings) s = randString();
     auto strings2 = strings.dup;

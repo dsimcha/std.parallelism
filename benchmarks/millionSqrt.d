@@ -7,11 +7,17 @@ appears to give a linear speedup here.
 */
 
 import std.stdio, std.datetime, std.parallelism, std.math, std.algorithm,
-    std.range, std.array;
+    std.range, std.array, std.getopt;
 
 enum nIter = 100;
 
-void main() {
+void main(string[] args) {
+    uint nCpu = uint.max;
+    getopt(args, "nCpu", &nCpu);
+    if(nCpu < uint.max && nCpu > 0) {
+        defaultPoolThreads = nCpu - 1;
+    }
+
     immutable nCores = taskPool.size() + 1;
     writefln("Parallel benchmarks being done with %s cores.", nCores);
 

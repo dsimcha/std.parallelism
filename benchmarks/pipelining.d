@@ -7,7 +7,7 @@ floats to ints, and finding the greatest common divisor of these ints with
 the nunmber 8675309.
 */
 import std.stdio, std.datetime, std.parallelism, std.random, std.algorithm,
-    std.range, std.numeric, std.conv;
+    std.range, std.numeric, std.conv, std.getopt;
 
 enum nTake = 1_000_000;
 
@@ -33,7 +33,13 @@ struct StringNums {
 }
 
 
-void main() {
+void main(string[] args) {
+    uint nCpu = uint.max;
+    getopt(args, "nCpu", &nCpu);
+    if(nCpu < uint.max && nCpu > 0) {
+        defaultPoolThreads = nCpu - 1;
+    }
+
     auto sw = StopWatch(autoStart);
     doSerial();
     writefln("Did serial string -> float, euclid in %s milliseconds.",
