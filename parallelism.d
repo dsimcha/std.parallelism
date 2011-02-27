@@ -902,11 +902,17 @@ public:
                 static assert(isInputRange!(Args2[1]));
                 alias args2[1] range;
                 alias args2[0] startVal;
-                size_t blockSize = defaultBlockSize(range.length);
+
+                static if(!is(typeof(blockSize))) {
+                    size_t blockSize = defaultBlockSize(range.length);
+                }
             } else {
                 static assert(args2.length == 1);
                 alias args2[0] range;
-                size_t blockSize = defaultBlockSize(range.length);
+
+                static if(!is(typeof(blockSize))) {
+                    size_t blockSize = defaultBlockSize(range.length);
+                }
 
 
                 enforce(!range.empty,
@@ -2668,7 +2674,7 @@ unittest {
     }
 }
 
-version = parallelismStressTest;
+//version = parallelismStressTest;
 
 // These are more like stress tests than real unit tests.  They print out
 // tons of stuff and should not be run every time make unittest is run.
