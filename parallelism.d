@@ -39,6 +39,53 @@ version(Posix) {
     import core.stdc.stdlib : alloca;
 }
 
+/*
+CPU detection code.
+*/
+private immutable uint osReportedNcpu;
+
+version(Windows) {
+    // BUGS:  Only works on Windows 2000 and above.
+
+    import core.sys.windows.windows;
+
+    struct SYSTEM_INFO {
+      union {
+        DWORD  dwOemId;
+        struct {
+          WORD wProcessorArchitecture;
+          WORD wReserved;
+        };
+      };
+      DWORD     dwPageSize;
+      LPVOID    lpMinimumApplicationAddress;
+      LPVOID    lpMaximumApplicationAddress;
+      LPVOID    dwActiveProcessorMask;
+      DWORD     dwNumberOfProcessors;
+      DWORD     dwProcessorType;
+      DWORD     dwAllocationGranularity;
+      WORD      wProcessorLevel;
+      WORD      wProcessorRevision;
+    }
+
+    extern(Windows) void GetSystemInfo(void*);
+
+    shared static this() {
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        osReportedNcpu = max(1, cast(uint) si.dwNumberOfProcessors);
+    }
+
+} else version(Posix) {
+    import core.sys.posix.unistd;
+
+    shared static this() {
+        osReportedNcpu = cast(uint) sysconf(_SC_NPROCESSORS_ONLN );
+    }
+} else {
+    static assert(0, "Don't know how to get N CPUs on this OS.");
+}
+
 /* Atomics code.  These just forward to core.atomic, but are written like this
    for two reasons:
 
@@ -506,17 +553,14 @@ public:
 
     /**
     Default constructor that initializes a $(D TaskPool) with
-    $(core.cpuid.coresPerCPU), minus 1 because the thread
+    the number of CPUs reported available by the OS, minus 1 because the thread
     that initialized the pool will also do work.
-
-    BUGS:  Will initialize with the wrong number of threads in cases were
-           core.cpuid is buggy.
 
     Note:  Initializing a pool with zero threads (as would happen in the
            case of a single-core CPU) is well-tested and does work.
      */
     this() @trusted {
-        this(coresPerCPU - 1);
+        this(osReportedNcpu - 1);
     }
 
     /**
@@ -1184,15 +1228,15 @@ One instance of this pool is shared across the entire program.
 
 private shared uint _defaultPoolThreads;
 shared static this() {
-    cas(&_defaultPoolThreads, _defaultPoolThreads, core.cpuid.coresPerCPU - 1U);
+    cas(&_defaultPoolThreads, _defaultPoolThreads, osReportedNcpu - 1U);
 }
 
 /**
 These functions get and set the number of threads in the default pool
 returned by $(D taskPool()).  If the setter is never called, the default value
-is the number of threads returned by $(D core.cpuid.coresPerCPU) - 1.  Any
-changes made via the setter after the default pool is initialized via the
-first call to $(D taskPool()) have no effect.
+is the number of threads returned by the number of CPUs reported available by
+the OS - 1.  Any changes made via the setter after the default pool is
+initialized via the first call to $(D taskPool()) have no effect.
 */
 @property uint defaultPoolThreads() @trusted {
     // Kludge around lack of atomic load.
@@ -2606,7 +2650,7 @@ unittest {
     assert(wlRange[1..2][0] == wlRange[1]);
 
     // Test default pool stuff.
-    assert(taskPool.size == core.cpuid.coresPerCPU - 1);
+    assert(taskPool.size == osReportedNcpu - 1);
 
     nums = null;
     foreach(i; parallel(iota(1000))) {
