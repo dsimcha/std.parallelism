@@ -920,6 +920,25 @@ public:
     auto minMax = taskPool.reduce!(min, max)(myArr);
     assert(minMax.field[0] == reduce!min(myArr));
     assert(minMax.field[1] == reduce!max(myArr));
+
+    // Parallel reduce can be combined with a lazy, random access, non-parallel
+    // map, such as std.algorithm.map to interesting effect.  The
+    // following example (thanks to Russel Winder) calculates pi by
+    // quadrature using std.parallelism.map and TaskPool.reduce.
+    // getTerm is naturally evaluated in parallel as needed by
+    // TaskPool.reduce.
+
+    immutable n = 1000000000;
+    immutable delta = 1.0 / n;
+
+    real getTerm(int i) {
+        immutable x = ( i - 0.5 ) * delta;
+        return delta / ( 1.0 + x * x ) ;
+    }
+
+    immutable pi = 4.0 * taskPool.reduce!"a + b"(
+        std.algorithm.map!getTerm(iota(n))
+    );
     ---
      */
     template reduce(functions...) {
