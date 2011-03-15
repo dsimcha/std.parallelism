@@ -2483,7 +2483,11 @@ private enum string parallelApplyMixin = q{
                 // Elide copying by just swapping buffers.
                 task.elements.length = range.buf1.length;
                 swap(range.buf1, task.elements);
-                range._length -= (task.elements.length - range.bufPos);
+             
+                static if(is(typeof(range._length))) {
+                    range._length -= (task.elements.length - range.bufPos);
+                }
+
                 range.doBufSwap();
 
             } else {
