@@ -60,11 +60,6 @@ version(Posix) {
     import core.stdc.stdlib : alloca;
 }
 
-/*
-CPU detection code.
-*/
-private immutable uint osReportedNcpu;
-
 version(Windows) {
     // BUGS:  Only works on Windows 2000 and above.
 
@@ -575,7 +570,7 @@ auto file1Data = file1Task.yieldWait();
 
 Note:
 This method of creating tasks allocates on the stack and requires an explicit
-submission to the $(TaskPool) using $(D TaskPool.put()).  It is designed for
+submission to the $(D TaskPool) using $(D TaskPool.put()).  It is designed for
 tasks that are to finish before the function in which they are created returns.
 If you want to escape the Task object from the function in which it was created
 or prefer to heap allocate and automatically submit to the pool, see
@@ -619,7 +614,7 @@ auto file1Data = file1Task.yieldWait();
 
 Notes:
 This method of creating tasks allocates on the stack and requires an explicit
-submission to the $(TaskPool) using $(D TaskPool.put()).  It is designed for
+submission to the $(D TaskPool) using $(D TaskPool.put()).  It is designed for
 tasks that are to finish before the function in which they are created returns.
 If you want to escape the Task object from the function in which it was created
 or prefer to heap allocate and automatically submit to the pool, see
@@ -660,6 +655,12 @@ if(is(typeof(fun(args))) && isSafeTask!F) {
     alias typeof(return) RT;
     return RT(fun, args);
 }
+
+/**
+The total number of CPUs available on the current machine, as reported by
+the operating system.
+*/
+immutable uint osReportedNcpu;
 
 /**
 This class encapsulates a task queue and a set of worker threads.  A task
@@ -933,9 +934,9 @@ private:
 public:
 
     /**
-    Default constructor that initializes a $(D TaskPool) with one worker thread
-    for each CPU reported available by the OS, minus 1 because the thread
-    that initialized the pool will also do work.
+    Default constructor that initializes a $(D TaskPool) with
+    $(D osReportedNcpu) - 1.  The minus 1 is included because the main thread
+    will also be available to do work.
 
     Note:  In the case of a single-core machine, the primitives provided
            by $(D TaskPool) will operate transparently in single-threaded mode.
@@ -986,7 +987,7 @@ public:
     // Parallel foreach works with or without an index variable.  It can be
     // iterate by ref if front() of the range being iterated over
     // returns by ref.
-    foreach(i, ref elem; parallel(logs, 100)) {
+    foreach(i, ref elem; taskPool.parallel(logs, 100)) {
         // Iterate over logs using work units of size 100.
         elem = log(i + 1.0);
     }
@@ -1025,7 +1026,7 @@ public:
     // work unit size.
     auto logs = new double[1_000_000];
 
-    foreach(i, ref elem; parallel(logs)) {
+    foreach(i, ref elem; taskPool.parallel(logs)) {
         elem = log(i + 1.0);
     }
     ---
@@ -1945,6 +1946,12 @@ public:
     access results produced by each worker thread from a single thread once you
     are no longer using the worker-local storage from multiple threads.
     Do not use this struct in the parallel portion of your algorithm.
+
+    The proper way to instantiate this object is to call
+    $(D WorkerLocalStorage.toRange).  Once instantiated, this object behaves
+    as a finite random-access range with assignable, lvalue elemends and
+    a length equal to the number of worker threads in the task pool that
+    created it plus 1.
      */
     static struct WorkerLocalStorageRange(T) {
     private:
@@ -1959,17 +1966,14 @@ public:
         }
 
     public:
-        ///
         ref T front() @property {
             return this[0];
         }
 
-        ///
         ref T back() @property {
             return this[_length - 1];
         }
 
-        ///
         void popFront() {
             if(_length > 0) {
                 beginOffset++;
@@ -1977,31 +1981,26 @@ public:
             }
         }
 
-        ///
         void popBack() {
             if(_length > 0) {
                 _length--;
             }
         }
 
-        ///
         typeof(this) save() @property {
             return this;
         }
 
-        ///
         ref T opIndex(size_t index) {
             assert(index < _length);
             return workerLocalStorage[index + beginOffset];
         }
 
-        ///
         void opIndexAssign(T val, size_t index) {
             assert(index < _length);
             workerLocalStorage[index] = val;
         }
 
-        ///
         typeof(this) opSlice(size_t lower, size_t upper) {
             assert(upper <= _length);
             auto newWl = this.workerLocalStorage;
@@ -2010,12 +2009,10 @@ public:
             return typeof(this)(newWl);
         }
 
-        ///
         bool empty() @property {
             return length == 0;
         }
 
-        ///
         size_t length() @property {
             return _length;
         }
@@ -2024,7 +2021,8 @@ public:
     /**
     Create an instance of worker-local storage, initialized with a given
     value.  The value is $(D lazy) so that you can, for example, easily
-    create one instance of a class for each worker.
+    create one instance of a class for each worker.  For usage example,
+    see the $(D WorkerLocalStorage) struct.
      */
     WorkerLocalStorage!(T) workerLocalStorage(T)(lazy T initialVal = T.init) {
         WorkerLocalStorage!(T) ret;
@@ -2155,6 +2153,30 @@ public:
     }
 
     /**
+    These functions allow getting and setting the OS scheduling priority of
+    the worker threads in this $(D TaskPool).  They simply forward to
+    $(D core.thread.priority()), so a given priority value here means the
+    same thing as an identical priority value in $(D core.thread).
+
+    Note:  For a size zero pool, the getter arbitrarily returns
+           $(D core.thread.Thread.PRIORITY_MIN) and the setter has no effect.
+    */
+    int priority() @property @trusted {
+        return (size == 0) ? core.thread.Thread.PRIORITY_MIN :
+                             pool[0].priority();
+    }
+
+    /// Ditto
+    void priority(int newPriority) @property @trusted {
+        if(size > 0) {
+            foreach(t; pool) {
+                t.priority(newPriority);
+            }
+        }
+    }
+
+
+    /**
     Convenience method that automatically creates a $(D Task) calling an alias
     on the GC heap and adds it to the back of the task queue  See examples for
     the non-member function $(D task()).
@@ -2225,9 +2247,8 @@ shared static this() {
 /**
 These functions get and set the number of threads in the default pool
 returned by $(D taskPool()).  If the setter is never called, the default value
-is the number of threads returned by the number of CPUs reported available by
-the OS - 1.  Any changes made via the setter after the default pool is
-initialized via the first call to $(D taskPool()) have no effect.
+is $(D osReportedNcpu) - 1  Any changes made via the setter after the default
+pool is initialized via the first call to $(D taskPool()) have no effect.
 */
 @property uint defaultPoolThreads() @trusted {
     // Kludge around lack of atomic load.
@@ -2656,6 +2677,17 @@ version(unittest) {
 // These are the tests that should be run every time Phobos is compiled.
 unittest {
     poolInstance = new TaskPool(2);
+
+    auto oldPriority = poolInstance.priority;
+    poolInstance.priority = Thread.PRIORITY_MAX;
+    assert(poolInstance.priority == Thread.PRIORITY_MAX);
+
+    poolInstance.priority = Thread.PRIORITY_MIN;
+    assert(poolInstance.priority == Thread.PRIORITY_MIN);
+
+    poolInstance.priority = oldPriority;
+    assert(poolInstance.priority == oldPriority);
+
     scope(exit) poolInstance.stop;
 
     static void refFun(ref uint num) {
