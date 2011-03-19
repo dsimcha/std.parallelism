@@ -599,7 +599,6 @@ ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
 
 /**
 Create a task that calls a function pointer, delegate, or functor.
-This works even for anonymous delegates.
 
 Examples:
 ---
@@ -974,7 +973,7 @@ public:
     Implements a parallel foreach loop over a range.  This works by implicitly
     creating and submitting one $(D Task) to the $(D TaskPool) for each work unit.
     A work unit may process one or more elements of $(D range).  The number of
-    elements processed per work unit is controlled by the $(D workUnitSIze)
+    elements processed per work unit is controlled by the $(D workUnitSize)
     parameter.  Smaller work units provide better load balancing, but larger
     work units can avoid the overhead of creating submitting large numbers of
     $(D Task) objects.
@@ -1022,9 +1021,12 @@ public:
 
     Examples:
     ---
-    auto sqrts = new double[1_000_000];
-    foreach(i, ref elem; parallel(sqrts)) {
-        elem = sqrt(i);
+    // Same example as the overload, but elide explicit specification of
+    // work unit size.
+    auto logs = new double[1_000_000];
+
+    foreach(i, ref elem; parallel(logs)) {
+        elem = log(i + 1.0);
     }
     ---
      */
@@ -1042,16 +1044,18 @@ public:
     }
 
     /**
-    Eager parallel map.  $(D functions) are the functions to be evaluated.
+    Eager parallel map.  $(D functions) are the functions to be evaluated,
+    passed as template alias parameters in a style similar to std.algorithm.
     The first argument must be a random access range.
+
     ---
-    real[] numbers = new real[1_000];
+    real[] numbers = new real[1_000_000];
     foreach(i, ref num; numbers) {
         num = i;
     }
 
-    // Find the square roots of numbers[].
-    real[] squares = taskPool.map!sqrt(numbers);
+    // Find the square roots of numbers.
+    real[] squareRoots = taskPool.map!sqrt(numbers);
     ---
 
     Immediately after the range argument, an optional work unit size argument
@@ -1061,7 +1065,7 @@ public:
 
     ---
     // Same thing, but make work units explicitly of size 100.
-    real[] squares = taskPool.map!"a * a"(numbers, 100);
+    real[] squareRoots = taskPool.map!sqrt(numbers, 100);
     ---
 
     An optional buffer for returining the results may be provided as the last
@@ -1070,12 +1074,12 @@ public:
 
     ---
     // Same thing, but explicitly pre-allocate a buffer.
-    auto squares = new real[numbers.length];
-    taskPool.map!"a * a"(numbers, squares);
+    auto squareRoots = new real[numbers.length];
+    taskPool.map!sqrt(numbers, squareRoots);
 
-    // Multiple functions, explicit buffer, and explicit block size.
+    // Multiple functions, explicit buffer, and explicit work unit size.
     auto results = new Tuple!(real, real)[numbers.length];
-    taskPool.map!("a * a", "-a")(numbers, 100, results);
+    taskPool.map!(sqrt, log)(numbers, 100, results);
     ---
      */
     template map(functions...) {
@@ -1208,14 +1212,14 @@ public:
     range:  The range to be mapped.  This must be an input range, though it
     should preferably be a random access range to avoid needing to buffer
     to temporary array before mapping.  If the $(D range) is not random access
-    it will be lazily buffered to an array of size bufSize before the map
+    it will be lazily buffered to an array of size $(D bufSize) before the map
     function is evaluated.  (For an exception to this rule, see Notes.)
 
     bufSize:  The size of the buffer to store the evaluated elements.
 
     workUnitSize:  The number of elements to evaluate in a single $(D Task).
-      Must be less than or equal to bufSize, and in practice should be a
-      fraction of bufSize such that all worker threads can be used.  If
+      Must be less than or equal to $(D bufSize), and in practice should be a
+      fraction of $(D bufSize) such that all worker threads can be used.  If
       the default of size_t.max is used, workUnitSize will be set to the
       pool-wide default.
 
@@ -1225,8 +1229,8 @@ public:
     Notes:
 
     If a range returned by $(D lazyMap) or $(D asyncBuf) is used as an input to
-    lazyMap(), then as an optimization the copying from the output buffer of
-    the first range to the input buffer of the second range is elided, even
+    $(D lazyMap()), then as an optimization the copying from the output buffer
+    of the first range to the input buffer of the second range is elided, even
     though the ranges returned by $(D lazyMap) and $(D asyncBuf) are input
     ranges.  However, this means that the $(D bufSize) parameter passed to the
     current call to $(D lazyMap()) will be ignored and the size of the buffer
@@ -1768,13 +1772,13 @@ public:
 
     /**
     Struct for creating worker-local storage.  Worker-local storage is
-    thread-local storage that exists only for worker threads in a given pool
-    plus a single thread outside the pool, is allocated on the heap in a way
-    that avoids false sharing, and doesn't necessarily have global scope within
-    any thread.  It can be accessed from any worker thread in the pool that
-    created  it, and one thread outside this pool.  All threads outside the
-    pool that created a given instance of worker-local storage share a single
-    slot.
+    thread-local storage that exists only for worker threads in a given
+    $(D TaskPool) plus a single thread outside the pool, is allocated on the
+    heap in a way that avoids false sharing, and doesn't necessarily have global
+    scope within any thread.  It can be accessed from any worker thread in the
+    pool that created  it, and one thread outside this pool.  All threads
+    outside the pool that created a given instance of worker-local storage
+    share a single slot.
 
     Since the underlying data for this struct is heap-allocated, this struct
     has reference semantics when passed around.
@@ -1797,7 +1801,7 @@ public:
     immutable delta = 1.0L / n;
 
     auto sums = taskPool.workerLocalStorage(0.0L);
-    foreach(i; iota(n)) {
+    foreach(i; parallel(iota(n))) {
         immutable x = ( i - 0.5L ) * delta;
         immutable toAdd = delta / ( 1.0 + x * x );
         sums.get = sums.get + toAdd;
