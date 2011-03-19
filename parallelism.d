@@ -2178,10 +2178,24 @@ public:
 
     /**
     Convenience method that automatically creates a $(D Task) calling an alias
-    on the GC heap and adds it to the back of the task queue  See examples for
-    the non-member function $(D task()).
+    on the GC heap and adds it to the back of the task queue.
 
     Returns:  A pointer to the $(D Task) object.
+
+    Examples:
+    ---
+    // Read two files into memory at the same time.
+    import std.file;
+
+    // Create and submit a Task object for reading foo.txt.
+    auto file1Task = taskPool.task!read("foo.txt");
+
+    // Read bar.txt in parallel.
+    auto file2Data = read("bar.txt");
+
+    // Get the results of reading foo.txt.
+    auto file1Data = file1Task.yieldWait();
+    ---
      */
     Task!(fun, Args)* task(alias fun, Args...)(Args args) {
         auto stuff = .task!(fun)(args);
@@ -2193,7 +2207,23 @@ public:
     /**
     Convenience method that automatically creates a $(D Task) calling a delegate,
     function pointer, or functor on the GC heap and adds it to the back of
-    the task queue.  See examples for the non-member function $(D task()).
+    the task queue.
+
+    Example:
+    ---
+    // Read two files in at the same time again, but this time use a function
+    // pointer instead of an alias to represent std.file.read.
+    import std.file;
+
+    // Create and submit a Task object for reading foo.txt.
+    auto file1Task = taskPool.task(&read, "foo.txt");
+
+    // Read bar.txt in parallel.
+    auto file2Data = read("bar.txt");
+
+    // Get the results of reading foo.txt.
+    auto file1Data = file1Task.yieldWait();
+    ---
 
     Returns:  A pointer to the $(D Task) object.
 
@@ -2245,10 +2275,11 @@ shared static this() {
 }
 
 /**
-These functions get and set the number of threads in the default pool
+These properties get and set the number of worker threads in the default pool
 returned by $(D taskPool()).  If the setter is never called, the default value
 is $(D osReportedNcpu) - 1  Any changes made via the setter after the default
-pool is initialized via the first call to $(D taskPool()) have no effect.
+pool is initialized via the first call to $(D taskPool()) have no effect
+on the number of worker threads in the default pool.
 */
 @property uint defaultPoolThreads() @trusted {
     // Kludge around lack of atomic load.
@@ -2261,15 +2292,29 @@ pool is initialized via the first call to $(D taskPool()) have no effect.
 }
 
 /**
-Convenience functions that simply forwards to taskPool.parallel().
+Convenience functions that forwards to taskPool.parallel().  The only
+purpose of these is to make parallel foreach less verbose and more
+readable.
+
+Example:
+---
+// Find the logarithm of every number from 1 to 1_000_000 in parallel,
+// using the default TaskPool instance.
+auto logs = new double[1_000_000];
+
+foreach(i, ref elem; parallel(logs)) {
+    elem = log(i + 1.0);
+}
+---
+
 */
 ParallelForeach!R parallel(R)(R range) {
     return taskPool.parallel(range);
 }
 
 /// Ditto
-ParallelForeach!R parallel(R)(R range, size_t blockSize) {
-    return taskPool.parallel(range, blockSize);
+ParallelForeach!R parallel(R)(R range, size_t workUnitSize) {
+    return taskPool.parallel(range, workUnitSize);
 }
 
 private struct ParallelForeachTask(R, Delegate)
