@@ -845,6 +845,7 @@ private:
         }
     } body {
         task.next = null;
+        task.exception = null;  // Get rid of old exceptions if this is a resubmit.
         if (head is null) { //Queue is empty.
             head = task;
             tail = task;
