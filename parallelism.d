@@ -1,17 +1,18 @@
 /**
 $(D std.parallelism) is a module that implements some high-level primitives
-for shared memory SMP parallelism.  These include parallel foreach, parallel
-reduce, parallel eager map, pipelining and future/promise parallelism primitives.
+for shared memory SMP _parallelism.  These include parallel foreach, parallel
+reduce, parallel eager map, pipelining and future/promise _parallelism
+primitives.
 
-This module is geared towards parallelism, not concurrency.  In particular,
+This module is geared towards _parallelism, not concurrency.  In particular,
 the default behavior on single-core machines is to use no multithreading at
-all, since there are no opportunities for parallelism on such machines.
+all, since there are no opportunities for _parallelism on such machines.
 
 $(D std.parallelism) is based on the concept of a $(D Task).  A $(D Task) is an
 object that represents the fundamental unit of work in this library and may be
 executed in parallel with any other $(D Task).  Using the $(D Task) object
 directly allows programming with a future/promise paradigm.  All other
-supported parallelism paradigms (parallel foreach, map, reduce, pipelining)
+supported _parallelism paradigms (parallel foreach, map, reduce, pipelining)
 represent an additional level of abstraction over $(D Task) in that they
 automatically create one or more $(D Task) objects, or closely related types
 that are conceptually identical but not part of the public API.
@@ -332,7 +333,7 @@ private template ElementsCompatible(R, A) {
 /**
 This struct represents the fundamental unit of work.  A $(D Task) may be
 executed in parallel with any other $(D Task).  Using this struct directly
-allows future/promise parallelism.  In this paradigm, a function (or delegate,
+allows future/promise _parallelism.  In this paradigm, a function (or delegate,
 functor, etc.) is executed in a thread other than the one it was called from.
 The calling thread does not block while the function is being executed.  A call
 to $(D workWait()), $(D yieldWait()), or $(D spinWait()) can be used to retrive
@@ -2188,27 +2189,34 @@ public:
     }
 
     /**
-    Turns the pool's threads into daemon threads so that, when the main threads
-    of the program exit, the threads in the pool are automatically terminated.
+    These properties control whether the worker threads are daemon threads.
+    A daemon thread is a thread that is automatically terminated when all
+    non-daemon threads have terminated.  A non-daemon thread will prevent
+    a program from terminating as long as it has not terminated.
+
+    If any $(D TaskPool) with non-daemon threads is active, either $(D stop()),
+    $(D join()) or $(D finish()) must be called on it before the program
+    can terminate.
+
+    The worker treads in the default $(D TaskPool) instance returned by the
+    $(D taskPool) property are daemon by default.  The worker threads of
+    manually instantiated task pools are non-daemon by default.
+
+    Note:  For a size zero pool, the getter arbitrarily returns true and the
+           setter has no effect.
     */
-    void makeDaemon() @trusted {
+    bool isDaemon() @property @trusted {
         lock();
         scope(exit) unlock();
-        foreach(thread; pool) {
-            thread.isDaemon = true;
-        }
+        return (size == 0) ? true : pool[0].isDaemon();
     }
 
-    /**
-    Undoes a call to $(D makeDaemon).  Turns the threads in this pool into
-    threads that will prevent a program from terminating even if the main
-    thread has already terminated.
-    */
-    void makeAngel() @trusted {
+    /// Ditto
+    void isDaemon(bool newVal) @property @trusted {
         lock();
         scope(exit) unlock();
         foreach(thread; pool) {
-            thread.isDaemon = false;
+            thread.isDaemon = newVal;
         }
     }
 
@@ -2319,7 +2327,7 @@ One instance of this pool is shared across the entire program.
         synchronized {
             if(!pool) {
                 pool = new TaskPool(defaultPoolThreads);
-                pool.makeDaemon();
+                pool.isDaemon = true;
             }
         }
 
