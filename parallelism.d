@@ -38,11 +38,11 @@ Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
 Synopsis:
 
 ---
-import std.algorithm, std.parallelism;
+import std.algorithm, std.parallelism, std.range;
 
 void main() {
     // Parallel reduce can be combined with a lazy, random access,
-    // non-parallel map, such as std.algorithm.map to interesting
+    // non-parallel map such as std.algorithm.map to interesting
     // effect.  The following example (thanks to Russel Winder)
     // calculates pi by quadrature using std.parallelism.map and
     // TaskPool.reduce. getTerm() is naturally evaluated in parallel
@@ -59,6 +59,11 @@ void main() {
     immutable pi = 4.0 * taskPool.reduce!"a + b"(
         std.algorithm.map!getTerm(iota(n))
     );
+
+    // Timings on an Athlon 64 X2 dual core machine:
+    //
+    // This implementation:                                    12.170 s
+    // Replacing taskPool.reduce with std.algorithm.reduce:    24.065 s
 }
 ---
 
@@ -1039,6 +1044,11 @@ public:
     foreach(i, ref elem; taskPool.parallel(logs)) {
         elem = log(i + 1.0);
     }
+
+    // Timings on an Athlon 64 X2 dual core machine:
+    //
+    // Parallel foreach implementation (above):  388 milliseconds
+    // Regular foreach implementation:           619 milliseconds
     ---
 
     Notes:
@@ -1099,13 +1109,15 @@ public:
     The first argument must be a random access range.
 
     ---
-    real[] numbers = new real[1_000_000];
-    foreach(i, ref num; numbers) {
-        num = i;
-    }
+    auto numbers = iota(100_000_000);
 
     // Find the square roots of numbers.
-    real[] squareRoots = taskPool.map!sqrt(numbers);
+    auto squareRoots = taskPool.map!sqrt(numbers);
+
+    // Timings on an Athlon 64 X2 dual core machine:
+    //
+    // Parallel map:                         0.802 s
+    // Equivalent serial implementation:     1.768 s
     ---
 
     Immediately after the range argument, an optional work unit size argument
@@ -1115,7 +1127,7 @@ public:
 
     ---
     // Same thing, but make work units explicitly of size 100.
-    real[] squareRoots = taskPool.map!sqrt(numbers, 100);
+    auto squareRoots = taskPool.map!sqrt(numbers, 100);
     ---
 
     An optional buffer for returining the results may be provided as the last
@@ -1124,11 +1136,11 @@ public:
 
     ---
     // Same thing, but explicitly pre-allocate a buffer.
-    auto squareRoots = new real[numbers.length];
+    auto squareRoots = new float[numbers.length];
     taskPool.map!sqrt(numbers, squareRoots);
 
     // Multiple functions, explicit buffer, and explicit work unit size.
-    auto results = new Tuple!(real, real)[numbers.length];
+    auto results = new Tuple!(float, real)[numbers.length];
     taskPool.map!(sqrt, log)(numbers, 100, results);
     ---
 
@@ -1156,6 +1168,10 @@ public:
                 alias args[$ - 1] buf;
                 alias args[0..$ - 1] args2;
                 alias Args[0..$ - 1] Args2;
+            } else static if(isArray!(Args[$ - 1]) && Args.length > 1) {
+                static assert(0, "Wrong buffer type.  Expected a " ~
+                    MapType!(Args[0], functions).stringof ~ "[].  Got a " ~
+                    Args[$ - 1].stringof ~ ".");
             } else {
                 MapType!(Args[0], functions)[] buf;
                 alias args args2;
@@ -1680,14 +1696,23 @@ public:
 
     Examples:
     ---
-    // Find the sum of squares of an array in parallel.
-    auto myArr = array(iota(100_000));
-    auto mySum = taskPool.reduce!"a + b * b"(0.0, myArr);
+    // Find the sum of squares of a range in parallel.
+    auto nums = iota(100_000_000);
+    auto mySum = taskPool.reduce!"a + b * b"(0.0, nums);
 
-    // Find both the min and max of myArr.
-    auto minMax = taskPool.reduce!(min, max)(myArr);
-    assert(minMax.field[0] == reduce!min(myArr));
-    assert(minMax.field[1] == reduce!max(myArr));
+    // Timings on an Athlon 64 X2 dual core machine:
+    //
+    // Parallel reduce:                     0.329 s
+    // Using std.algorithm.reduce instead:  0.790 s
+
+    // Find both the min and max of nums.  This example illustrates the
+    // mechanics of using reduce() with multiple functions.  However, this
+    // example performs slower in parallel than in serial, probably because
+    // of the overhead of accessing iota() with random access instead of
+    // forward access.
+    auto minMax = taskPool.reduce!(min, max)(nums);
+    assert(minMax.field[0] == reduce!min(nums));
+    assert(minMax.field[1] == reduce!max(nums));
     ---
 
     Exception handling:
