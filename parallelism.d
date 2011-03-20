@@ -89,14 +89,14 @@ version(Windows) {
     shared static this() {
         SYSTEM_INFO si;
         GetSystemInfo(&si);
-        osReportedNcpu = max(1, cast(uint) si.dwNumberOfProcessors);
+        totalCPUs = max(1, cast(uint) si.dwNumberOfProcessors);
     }
 
 } else version(Posix) {
     import core.sys.posix.unistd;
 
     shared static this() {
-        osReportedNcpu = cast(uint) sysconf(_SC_NPROCESSORS_ONLN );
+        totalCPUs = cast(uint) sysconf(_SC_NPROCESSORS_ONLN );
     }
 } else {
     static assert(0, "Don't know how to get N CPUs on this OS.");
@@ -488,7 +488,7 @@ struct Task(alias fun, Args...) {
         this.pool.tryStealDelete( cast(AbstractTask*) &this);
 
         while(true) {
-            if(done) {
+            if(done) {  // doen() implicitly checks for exceptions.
                 static if(is(ReturnType == void)) {
                     return;
                 } else {
@@ -660,7 +660,7 @@ if(is(typeof(fun(args))) && isSafeTask!F) {
 The total number of CPUs available on the current machine, as reported by
 the operating system.
 */
-immutable uint osReportedNcpu;
+immutable uint totalCPUs;
 
 /**
 This class encapsulates a task queue and a set of worker threads.  A task
@@ -717,14 +717,12 @@ private:
 
         try {
             job.job();
-            if(job.shouldSetDone) {
-                atomicSetUbyte(job.taskStatus, TaskState.done);
-            }
         } catch(Throwable e) {
             job.exception = e;
-            if(job.shouldSetDone) {
-                atomicSetUbyte(job.taskStatus, TaskState.done);
-            }
+        }
+
+        if(job.shouldSetDone) {
+            atomicSetUbyte(job.taskStatus, TaskState.done);
         }
     }
 
@@ -845,7 +843,6 @@ private:
         }
     } body {
         task.next = null;
-        task.exception = null;  // Get rid of old exceptions if this is a resubmit.
         if (head is null) { //Queue is empty.
             head = task;
             tail = task;
@@ -936,14 +933,14 @@ public:
 
     /**
     Default constructor that initializes a $(D TaskPool) with
-    $(D osReportedNcpu) - 1.  The minus 1 is included because the main thread
+    $(D totalCPUs) - 1.  The minus 1 is included because the main thread
     will also be available to do work.
 
     Note:  In the case of a single-core machine, the primitives provided
            by $(D TaskPool) will operate transparently in single-threaded mode.
      */
     this() @trusted {
-        this(osReportedNcpu - 1);
+        this(totalCPUs - 1);
     }
 
     /**
@@ -973,12 +970,16 @@ public:
 
     /**
     Implements a parallel foreach loop over a range.  This works by implicitly
-    creating and submitting one $(D Task) to the $(D TaskPool) for each work unit.
-    A work unit may process one or more elements of $(D range).  The number of
-    elements processed per work unit is controlled by the $(D workUnitSize)
-    parameter.  Smaller work units provide better load balancing, but larger
-    work units can avoid the overhead of creating submitting large numbers of
-    $(D Task) objects.
+    creating and submitting one $(D Task) to the $(D TaskPool) for each work
+    unit.  A work unit may process one or more elements of $(D range).  The
+    number of elements processed per work unit is controlled by the
+    $(D workUnitSize) parameter.  Smaller work units provide better load
+    balancing, but larger work units can avoid the overhead of creating and
+    submitting large numbers of $(D Task) objects.  Generally, the less time
+    a single iteration of the loop takes, the larger $(D workUnitSize) should
+    be.  For very expensive loop bodies, $(D workUnitSize) should simply
+    be set to 1.  An overload that chooses a default work unit size is
+    also available.
 
     Examples:
     ---
@@ -988,13 +989,25 @@ public:
     // Parallel foreach works with or without an index variable.  It can be
     // iterate by ref if front() of the range being iterated over
     // returns by ref.
+
+    // Iterate over logs using work units of size 100.
     foreach(i, ref elem; taskPool.parallel(logs, 100)) {
-        // Iterate over logs using work units of size 100.
+
+        elem = log(i + 1.0);
+    }
+
+    // Same thing, but use the default work unit size.
+    foreach(i, ref elem; taskPool.parallel(logs)) {
         elem = log(i + 1.0);
     }
     ---
 
     Notes:
+
+    This implementation of parallel foreach lazily submits $(D Task) objects
+    to the task queue, rather than eagerly submitting all of them upfront.
+    This allows the amount of memory used to be sublinear in the length of
+    $(D range) for fixed work unit size.
 
     Breaking from a parallel foreach loop breaks from the current work unit,
     but still executes other work units.  A goto from inside the parallel
@@ -1009,29 +1022,25 @@ public:
     that in this case the $(D workUnitSize) parameter of this function will be
     ignored and the work unit size will be set to the buffer size of the object
     returned by $(D asyncBuf) or $(D lazyMap).
-     */
+
+    Exception Handling:
+
+    When at least one exception is thrown from inside a parallel foreach loop,
+    the submission of additional $(D Task) objects is terminated as soon as
+    possible, in a non-deterministic manner.  All currently executing or
+    enqueued work units are allowed to complete.  Then, all exceptions that
+    were thrown by any work unit are chained using $(D Throwable.next) and
+    rethrown.  The order of the exception chaining is non-deterministic.
+
+    */
     ParallelForeach!R parallel(R)(R range, size_t workUnitSize) {
+        enforce(workUnitSize > 0, "workUnitSize must be > 0.");
         alias ParallelForeach!R RetType;
         return RetType(this, range, workUnitSize);
     }
 
-    /**
-    Parallel foreach with default work unit size.  For ranges that don't have
-    a length, the default is 512 elements.  For ranges that do, the default
-    is whatever number would create exactly 4 times as many work units as
-    we have worker threads.
 
-    Examples:
-    ---
-    // Same example as the overload, but elide explicit specification of
-    // work unit size.
-    auto logs = new double[1_000_000];
-
-    foreach(i, ref elem; taskPool.parallel(logs)) {
-        elem = log(i + 1.0);
-    }
-    ---
-     */
+    /// Ditto
     ParallelForeach!R parallel(R)(R range) {
         static if(hasLength!R) {
             // Default block size is such that we would use 2x as many
@@ -1083,6 +1092,16 @@ public:
     auto results = new Tuple!(real, real)[numbers.length];
     taskPool.map!(sqrt, log)(numbers, 100, results);
     ---
+
+    Exception Handling:
+
+    When at least one exception is thrown from inside the map function,
+    the submission of additional $(D Task) objects is terminated as soon as
+    possible, in a non-deterministic manner.  All currently executing or
+    enqueued work units are allowed to complete.  Then, all exceptions that
+    were thrown by any work unit are chained using $(D Throwable.next) and
+    rethrown.  The order of the exception chaining is non-deterministic.
+
      */
     template map(functions...) {
         ///
@@ -1142,6 +1161,7 @@ public:
                 return buf;
             }
 
+            Throwable firstException, lastException;
             alias MapTask!(fun, R, typeof(buf)) MTask;
             MTask[] tasks = (cast(MTask*) alloca(this.size * MTask.sizeof * 2))
                             [0..this.size * 2];
@@ -1163,12 +1183,13 @@ public:
             }
 
             ubyte doneSubmitting = 0;
-
             Task!(run, void delegate()) submitNextBatch;
 
             void submitJobs() {
-                // Search for slots, then sleep.
-                foreach(ref task; tasks) if(task.done) {
+                // Search for slots.
+                foreach(ref task; tasks) {
+                    mixin(parallelExceptionHandling);
+
                     useTask(task);
                     if(curPos >= len) {
                         atomicSetUbyte(doneSubmitting, 1);
@@ -1178,7 +1199,7 @@ public:
 
                 // Now that we've submitted all the worker tasks, submit
                 // the next submission task.  Synchronizing on the pool
-                // to prevent the stealing thread from deleting the job
+                // to prevent a deleting thread from deleting the job
                 // before it's submitted.
                 lock();
                 atomicSetUbyte(submitNextBatch.taskStatus, TaskState.notStarted);
@@ -1640,6 +1661,12 @@ public:
         std.algorithm.map!getTerm(iota(n))
     );
     ---
+
+    Exception handling:
+
+    After all work units are finished executing, if any exceptions were thrown
+    they are chained together via $(D Throwable.next) and rethrown.  The order
+    in which the exceptions are chained is non-deterministic.
      */
     template reduce(functions...) {
 
@@ -1764,10 +1791,22 @@ public:
             // Now that we've tried to steal every task, they're all either done
             // or in progress.  Wait on all of them.
             E result = startVal;
+
+            Throwable firstException, lastException;
+
             foreach(ref task; tasks) {
-                task.yieldWait();
-                result = finishFun(result, task.returnVal);
+                try {
+                    task.yieldWait();
+                } catch(Throwable e) {
+                    addToChain(e, firstException, lastException);
+                    continue;
+                }
+
+                if(!firstException) result = finishFun(result, task.returnVal);
             }
+
+            if(firstException) throw firstException;
+
             return result;
         }
     }
@@ -2272,13 +2311,13 @@ One instance of this pool is shared across the entire program.
 
 private shared uint _defaultPoolThreads;
 shared static this() {
-    cas(&_defaultPoolThreads, _defaultPoolThreads, osReportedNcpu - 1U);
+    cas(&_defaultPoolThreads, _defaultPoolThreads, totalCPUs - 1U);
 }
 
 /**
 These properties get and set the number of worker threads in the default pool
 returned by $(D taskPool()).  If the setter is never called, the default value
-is $(D osReportedNcpu) - 1  Any changes made via the setter after the default
+is $(D totalCPUs) - 1  Any changes made via the setter after the default
 pool is initialized via the first call to $(D taskPool()) have no effect
 on the number of worker threads in the default pool.
 */
@@ -2478,9 +2517,7 @@ if(isRandomAccessRange!R && hasLength!R) {
         pool.lock();
         scope(exit) pool.unlock();
 
-        // Again, no work stealing.
-
-        while(!done()) {
+         while(!done()) {
             pool.waitUntilCompletion();
         }
 
@@ -2490,9 +2527,26 @@ if(isRandomAccessRange!R && hasLength!R) {
     }
 }
 
-// Where the magic happens.  This mixin causes tasks to be submitted lazily to
+// This mixin causes rethrown exceptions to be caught and chained.  It's used
+// in parallel map and foreach.
+private enum parallelExceptionHandling = q{
+    try {
+        // Calling done() rethrows exceptions.
+        if(!task.done) {
+            continue;
+        }
+    } catch(Throwable e) {
+        firstException = e;
+        lastException = findLastException(e);
+        task.exception = null;
+        atomicSetUbyte(doneSubmitting, 1);
+        return;
+    }
+};
+
+// This mixin causes tasks to be submitted lazily to
 // the task pool.  Attempts are then made by the calling thread to steal
-// them.
+// them.  It's used in parallel map and foreach.
 private enum submitAndSteal = q{
 
     // See documentation for BaseMixin.shouldSetDone.
@@ -2502,7 +2556,7 @@ private enum submitAndSteal = q{
     submitJobs();
 
     while( !atomicReadUbyte(doneSubmitting) ) {
-        // Try to steal parallel foreach tasks.
+        // Try to do parallel foreach tasks in this thread.
         foreach(ref task; tasks) {
             pool.tryStealDelete( cast(AbstractTask*) &task);
         }
@@ -2517,10 +2571,15 @@ private enum submitAndSteal = q{
         pool.tryStealDelete( cast(AbstractTask*) &task);
     }
 
-
     foreach(ref task; tasks) {
-        task.wait();
+        try {
+            task.wait();
+        } catch(Throwable e) {
+            addToChain(e, firstException, lastException);
+        }
     }
+
+    if(firstException) throw firstException;
 };
 
 /*------Structs that implement opApply for parallel foreach.------------------*/
@@ -2560,6 +2619,8 @@ private enum string parallelApplyMixin = q{
         return res;
     }
 
+    Throwable firstException, lastException;
+
     PTask[] tasks = (cast(PTask*) alloca(pool.size * PTask.sizeof * 2))
                     [0..pool.size * 2];
     tasks[] = PTask.init;
@@ -2576,7 +2637,6 @@ private enum string parallelApplyMixin = q{
     } else {
         enum bool bufferTrick = false;
     }
-
 
     static if(randLen!R) {
 
@@ -2597,26 +2657,9 @@ private enum string parallelApplyMixin = q{
             pool.unlock();
         }
 
-        void submitJobs() {
-            // Search for slots to recycle.
-            foreach(ref task; tasks) if(task.done) {
-                useTask(task);
-                if(curPos >= len) {
-                    atomicSetUbyte(doneSubmitting, 1);
-                    return;
-                }
-            }
-
-            // Now that we've submitted all the worker tasks, submit
-            // the next submission task.  Synchronizing on the pool
-            // to prevent the stealing thread from deleting the job
-            // before it's submitted.
-            pool.lock();
-            atomicSetUbyte(submitNextBatch.taskStatus, TaskState.notStarted);
-            pool.abstractPutNoSync( cast(AbstractTask*) &submitNextBatch);
-            pool.unlock();
+        bool emptyCheck() {
+            return curPos >= len;
         }
-
     } else {
 
         static if(bufferTrick) {
@@ -2667,34 +2710,67 @@ private enum string parallelApplyMixin = q{
             pool.unlock();
         }
 
+        bool emptyCheck() {
+            return range.empty;
+        }
+    }
 
-        void submitJobs() {
-            // Search for slots to recycle.
-            foreach(ref task; tasks) if(task.done) {
-                useTask(task);
-                if(range.empty) {
-                    atomicSetUbyte(doneSubmitting, 1);
-                    return;
-                }
+    // This has to be down here to work around forward reference issues.
+    void submitJobs() {
+        // Search for slots to recycle.
+        foreach(ref task; tasks) {
+            mixin(parallelExceptionHandling);
+
+            useTask(task);
+            if(emptyCheck()) {
+                atomicSetUbyte(doneSubmitting, 1);
+                return;
             }
-
-            // Now that we've submitted all the worker tasks, submit
-            // the next submission task.  Synchronizing on the pool
-            // to prevent the stealing thread from deleting the job
-            // before it's submitted.
-            pool.lock();
-            atomicSetUbyte(submitNextBatch.taskStatus, TaskState.notStarted);
-            pool.abstractPutNoSync( cast(AbstractTask*) &submitNextBatch);
-            pool.unlock();
         }
 
+        // Now that we've submitted all the worker tasks, submit
+        // the next submission task.  Synchronizing on the pool
+        // to prevent the stealing thread from deleting the job
+        // before it's submitted.
+        pool.lock();
+        atomicSetUbyte(submitNextBatch.taskStatus, TaskState.notStarted);
+        pool.abstractPutNoSync( cast(AbstractTask*) &submitNextBatch);
+        pool.unlock();
     }
+
     submitNextBatch = task(&submitJobs);
 
     mixin(submitAndSteal);
 
     return 0;
 };
+
+// Calls e.next until the end of the chain is found.
+private Throwable findLastException(Throwable e) pure nothrow {
+    if(e is null) return null;
+
+    while(e.next) {
+        e = e.next;
+    }
+
+    return e;
+}
+
+// Adds e to the exception chain.
+private void addToChain(
+    Throwable e,
+    ref Throwable firstException,
+    ref Throwable lastException
+) pure nothrow {
+    if(firstException) {
+        assert(lastException);
+        lastException.next = e;
+        lastException = findLastException(e);
+    } else {
+        firstException = e;
+        lastException = findLastException(e);
+    }
+}
 
 private struct ParallelForeach(R) {
     TaskPool pool;
@@ -2844,7 +2920,7 @@ unittest {
     assert(wlRange[1..2][0] == wlRange[1]);
 
     // Test default pool stuff.
-    assert(taskPool.size == osReportedNcpu - 1);
+    assert(taskPool.size == totalCPUs - 1);
 
     nums = null;
     foreach(i; parallel(iota(1000))) {
