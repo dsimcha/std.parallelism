@@ -1275,6 +1275,11 @@ public:
         sum += elem;
     }
     ---
+
+    Exception handling:  Any exceptions thrown while iterating over $(D range)
+    or computing the map function are re-thrown on a call to $(D popFront()).
+    In the case of exceptions thrown while computing the map function,
+    the exceptions are chained as in $(D TaskPool.map).
     */
     template lazyMap(functions...) {
 
@@ -1502,6 +1507,9 @@ public:
         matrix ~= to!(double[])(ls);
     }
     ---
+
+    Exception handling:  Any exceptions thrown while iterating over $(D range)
+    are re-thrown on a call to $(D popFront()).
     */
     auto asyncBuf(R)(R range, size_t bufSize = 100) {
         static final class AsyncBuf {
