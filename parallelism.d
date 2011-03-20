@@ -1,14 +1,14 @@
 /**
-$(D std.parallelism) is a module that implements some high-level primitives
+$(D std._parallelism) is a module that implements high-level primitives
 for shared memory SMP _parallelism.  These include parallel foreach, parallel
 reduce, parallel eager map, pipelining and future/promise _parallelism
-primitives.
+primitives.  $(D std._parallelism) is recommended when the same operation is
+to be executed in parallel on different data, or when a function is to be
+executed in a background thread and its result returned to some well-defined
+main thread.  For communication between arbitrary threads, see
+$(D std.concurrency).
 
-This module is geared towards _parallelism, not concurrency.  In particular,
-the default behavior on single-core machines is to use no multithreading at
-all, since there are no opportunities for _parallelism on such machines.
-
-$(D std.parallelism) is based on the concept of a $(D Task).  A $(D Task) is an
+$(D std._parallelism) is based on the concept of a $(D Task).  A $(D Task) is an
 object that represents the fundamental unit of work in this library and may be
 executed in parallel with any other $(D Task).  Using the $(D Task) object
 directly allows programming with a future/promise paradigm.  All other
@@ -29,13 +29,38 @@ the submitting thread before execution by a worker thread has begun, the
 $(D Task) can be removed from the task queue and executed immediately in the
 submitting thread rather than in a worker thread.
 
-Warning:  Most of this module completely subverts D's type system to achieve
-          unchecked data sharing and cannot be used with SafeD.
-          If you're looking for D's flagship message passing concurrency
-          model, which can be used with SafeD, you should use
-          $(D std.concurrency) instead.  However, the one exception is that
-          tasks can be used safely (i.e. from SafeD) under a limited set of
-          circumstances, detailed in the documentation for $(D task).
+Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
+          this module allow unchecked data sharing between threads and cannot
+          guarantee that client code is free from low level data races.
+          Artifacts that are provably free from such issues are marked
+          $(D @safe) or $(D @trusted).
+
+Synopsis:
+
+---
+import std.algorithm, std.parallelism;
+
+void main() {
+    // Parallel reduce can be combined with a lazy, random access,
+    // non-parallel map, such as std.algorithm.map to interesting
+    // effect.  The following example (thanks to Russel Winder)
+    // calculates pi by quadrature using std.parallelism.map and
+    // TaskPool.reduce. getTerm() is naturally evaluated in parallel
+    // as needed by TaskPool.reduce.
+
+    immutable n = 1_000_000_000;
+    immutable delta = 1.0 / n;
+
+    real getTerm(int i) {
+        immutable x = ( i - 0.5 ) * delta;
+        return delta / ( 1.0 + x * x ) ;
+    }
+
+    immutable pi = 4.0 * taskPool.reduce!"a + b"(
+        std.algorithm.map!getTerm(iota(n))
+    );
+}
+---
 
 Author:  David Simcha
 Copyright:  Copyright (c) 2009-2011, David Simcha.
@@ -253,7 +278,7 @@ private template BaseMixin(ubyte initTaskStatus) {
      * stealing loop from setting them to done.*/
     bool shouldSetDone = true;
 
-    bool done() {
+    bool done() @property {
         if(atomicReadUbyte(taskStatus) == TaskState.done) {
             if(exception) {
                 throw exception;
@@ -336,20 +361,21 @@ executed in parallel with any other $(D Task).  Using this struct directly
 allows future/promise _parallelism.  In this paradigm, a function (or delegate,
 functor, etc.) is executed in a thread other than the one it was called from.
 The calling thread does not block while the function is being executed.  A call
-to $(D workWait()), $(D yieldWait()), or $(D spinWait()) can be used to retrive
-the return value after the function is finished executing.
+to $(D workForce()), $(D yieldForce()), or $(D spinForce()) can be used to
+retrieve the return value after the function is finished executing.
 
 The proper way to create an instance of this struct is via the $(D task())
 function.  See $(D task()) for usage examples.
 
 Notes:  If a $(D Task) has been submitted to a $(D TaskPool) instance, is
 being stored in a stack frame, and has not yet finished, the destructor for
-this struct will automatically call $(D yieldWait()) so that the task can
+this struct will automatically call $(D yieldForce()) so that the task can
 finish and the stack frame can be destroyed safely.
 
-Function results are returned from $(D yieldWait()) and friends by ref.  If
-$(D fun) returns by ref, the reference will point directly to the returned
-reference of $(D fun).  Otherwise it will point to a field in this struct.
+Function results are returned from $(D yieldForce()), $(D spinForce()) and
+$(D workForce()) by ref.  If $(D fun) returns by ref, the reference will point
+directly to the returned reference of $(D fun).  Otherwise it will point to a
+field in this struct.
 
 Copying of this struct is disabled, since it would provide no useful semantics.
 If you want to pass this struct around, you should do it by reference or
@@ -434,10 +460,10 @@ struct Task(alias fun, Args...) {
     task to be available relatively quickly, on a timescale shorter
     than that of an OS context switch.
      */
-    @property ref ReturnType spinWait() @trusted {
+    @property ref ReturnType spinForce() @trusted {
         enforcePool();
 
-        this.pool.tryStealDelete( cast(AbstractTask*) &this);
+        this.pool.tryDeleteExecute( cast(AbstractTask*) &this);
 
         while(atomicReadUbyte(this.taskStatus) != TaskState.done) {}
 
@@ -460,11 +486,11 @@ struct Task(alias fun, Args...) {
     task to take a while, as waiting on a condition variable
     introduces latency, but results in negligible wasted CPU cycles.
      */
-    @property ref ReturnType yieldWait() @trusted {
+    @property ref ReturnType yieldForce() @trusted {
         enforcePool();
-        this.pool.tryStealDelete( cast(AbstractTask*) &this);
-        if(atomicReadUbyte(this.taskStatus) == TaskState.done) {
+        this.pool.tryDeleteExecute( cast(AbstractTask*) &this);
 
+        if(done) {
             static if(is(ReturnType == void)) {
                 return;
             } else {
@@ -494,11 +520,11 @@ struct Task(alias fun, Args...) {
     execute any other available tasks from the $(D TaskPool) instance that
     this $(D Task) was submitted to until this one
     is finished.  If it threw an exception, rethrow that exception.
-    If no other tasks are available, yield wait.
+    If no other tasks are available, wait on a condition variable.
      */
-    @property ref ReturnType workWait() @trusted {
+    @property ref ReturnType workForce() @trusted {
         enforcePool();
-        this.pool.tryStealDelete( cast(AbstractTask*) &this);
+        this.pool.tryDeleteExecute( cast(AbstractTask*) &this);
 
         while(true) {
             if(done) {  // doen() implicitly checks for exceptions.
@@ -523,7 +549,7 @@ struct Task(alias fun, Args...) {
             if(job !is null) {
 
                 version(verboseUnittest) {
-                    stderr.writeln("Doing workWait work.");
+                    stderr.writeln("Doing workForce work.");
                 }
 
                 pool.doJob(job);
@@ -537,10 +563,10 @@ struct Task(alias fun, Args...) {
                 }
             } else {
                 version(verboseUnittest) {
-                    stderr.writeln("Yield from workWait.");
+                    stderr.writeln("Yield from workForce.");
                 }
 
-                return yieldWait();
+                return yieldForce();
             }
         }
     }
@@ -548,12 +574,12 @@ struct Task(alias fun, Args...) {
     ///  Returns true if the $(D Task) is finished executing.
     @property bool done() @trusted {
         // Explicitly forwarded for documentation purposes.
-        return Base.done();
+        return Base.done;
     }
 
     @safe ~this() {
         if(pool !is null && taskStatus != TaskState.done) {
-            yieldWait();
+            yieldForce();
         }
     }
 
@@ -578,7 +604,7 @@ taskPool.put(file1Task);
 auto file2Data = read("bar.txt");
 
 // Get the results of reading foo.txt.
-auto file1Data = file1Task.yieldWait();
+auto file1Data = file1Task.yieldForce();
 ---
 
 Note:
@@ -595,7 +621,7 @@ Task!(fun, Args) task(alias fun, Args...)(Args args) {
 }
 
 /**
-Calls a delegate or function pointer with $(D args).  This is an
+Calls $(D fpOrDelegate) with $(D args).  This is an
 adapter that makes $(D Task) work with delegates, function pointers and
 functors instead of just aliases.  It is included in the documentation
 to clarify how this case is handled, but is not meant to be used directly
@@ -622,7 +648,7 @@ taskPool.put(file1Task);
 auto file2Data = read("bar.txt");
 
 // Get the results of reading foo.txt.
-auto file1Data = file1Task.yieldWait();
+auto file1Data = file1Task.yieldForce();
 ---
 
 Notes:
@@ -870,7 +896,7 @@ private:
 
     // Same as trySteal, but also deletes the task from the queue so the
     // Task object can be recycled.
-    bool tryStealDelete(AbstractTask* toSteal) {
+    bool tryDeleteExecute(AbstractTask* toSteal) {
         if( !deleteItem(toSteal) ) {
             return false;
         }
@@ -1222,11 +1248,11 @@ public:
 
             submitNextBatch = .task(&submitJobs);
 
-            // The submitAndSteal mixin relies on the TaskPool instance
+            // The submitAndExecute mixin relies on the TaskPool instance
             // being called pool.
             TaskPool pool = this;
 
-            mixin(submitAndSteal);
+            mixin(submitAndExecute);
 
             return buf;
         }
@@ -1457,7 +1483,7 @@ public:
                     }
 
                     buf2 = buf1;
-                    buf1 = nextBufTask.yieldWait();
+                    buf1 = nextBufTask.yieldForce();
                     bufPos = 0;
 
                     if(range.empty) {
@@ -1596,7 +1622,7 @@ public:
                 }
 
                 buf2 = buf1;
-                buf1 = nextBufTask.yieldWait();
+                buf1 = nextBufTask.yieldForce();
                 bufPos = 0;
 
                 if(range.empty) {
@@ -1656,31 +1682,12 @@ public:
     ---
     // Find the sum of squares of an array in parallel.
     auto myArr = array(iota(100_000));
-    auto myMax = taskPool.reduce!"a + b * b"(myArr);
+    auto mySum = taskPool.reduce!"a + b * b"(0.0, myArr);
 
     // Find both the min and max of myArr.
     auto minMax = taskPool.reduce!(min, max)(myArr);
     assert(minMax.field[0] == reduce!min(myArr));
     assert(minMax.field[1] == reduce!max(myArr));
-
-    // Parallel reduce can be combined with a lazy, random access, non-parallel
-    // map, such as std.algorithm.map to interesting effect.  The
-    // following example (thanks to Russel Winder) calculates pi by
-    // quadrature using std.parallelism.map and TaskPool.reduce.
-    // getTerm is naturally evaluated in parallel as needed by
-    // TaskPool.reduce.
-
-    immutable n = 1_000_000_000;
-    immutable delta = 1.0 / n;
-
-    real getTerm(int i) {
-        immutable x = ( i - 0.5 ) * delta;
-        return delta / ( 1.0 + x * x ) ;
-    }
-
-    immutable pi = 4.0 * taskPool.reduce!"a + b"(
-        std.algorithm.map!getTerm(iota(n))
-    );
     ---
 
     Exception handling:
@@ -1804,20 +1811,20 @@ public:
                 useTask(task);
             }
 
-            // Try to steal each of these.
+            // Try to execute each of these in the current thread
             foreach(ref task; tasks) {
-                tryStealDelete( cast(AbstractTask*) &task);
+                tryDeleteExecute( cast(AbstractTask*) &task);
             }
 
-            // Now that we've tried to steal every task, they're all either done
-            // or in progress.  Wait on all of them.
+            // Now that we've tried to execute every task, they're all either
+            // done or in progress.  Force all of them.
             E result = startVal;
 
             Throwable firstException, lastException;
 
             foreach(ref task; tasks) {
                 try {
-                    task.yieldWait();
+                    task.yieldForce();
                 } catch(Throwable e) {
                     addToChain(e, firstException, lastException);
                     continue;
@@ -2132,11 +2139,11 @@ public:
     // be accessed without any synchronization primitives.
     pool.join();
 
-    // Use spinWait() since the results are guaranteed to have been computed
-    // and spinWait() is the cheapest of the wait functions.
-    auto result1 = task1.spinWait();
-    auto result2 = task2.spinWait();
-    auto result3 = task3.spinWait();
+    // Use spinForce() since the results are guaranteed to have been computed
+    // and spinForce() is the cheapest of the force functions.
+    auto result1 = task1.spinForce();
+    auto result2 = task2.spinForce();
+    auto result3 = task3.spinForce();
     ---
     */
     void join() @trusted {
@@ -2262,7 +2269,7 @@ public:
     auto file2Data = read("bar.txt");
 
     // Get the results of reading foo.txt.
-    auto file1Data = file1Task.yieldWait();
+    auto file1Data = file1Task.yieldForce();
     ---
      */
     Task!(fun, Args)* task(alias fun, Args...)(Args args) {
@@ -2290,7 +2297,7 @@ public:
     auto file2Data = read("bar.txt");
 
     // Get the results of reading foo.txt.
-    auto file1Data = file1Task.yieldWait();
+    auto file1Data = file1Task.yieldForce();
     ---
 
     Returns:  A pointer to the $(D Task) object.
@@ -2424,9 +2431,9 @@ if(isRandomAccessRange!R && hasLength!R) {
     R myRange;
     Delegate runMe;
 
-    void wait() {
+    void force() {
         if(pool is null) {
-            // Never submitted.  No need to wait.
+            // Never submitted.  No need to force.
             return;
         }
 
@@ -2488,9 +2495,9 @@ if(!isRandomAccessRange!R || !hasLength!R) {
     }
     size_t startIndex;
 
-    void wait() {
+    void force() {
         if(pool is null) {
-            // Never submitted.  No need to wait.
+            // Never submitted.  No need to force.
             return;
         }
 
@@ -2536,9 +2543,9 @@ if(isRandomAccessRange!R && hasLength!R) {
     size_t lowerBound;
     size_t upperBound;
 
-    void wait() {
+    void force() {
         if(pool is null) {
-            // Never submitted.  No need to wait on it.
+            // Never submitted.  No need to force it.
             return;
         }
 
@@ -2573,9 +2580,9 @@ private enum parallelExceptionHandling = q{
 };
 
 // This mixin causes tasks to be submitted lazily to
-// the task pool.  Attempts are then made by the calling thread to steal
+// the task pool.  Attempts are then made by the calling thread to execute
 // them.  It's used in parallel map and foreach.
-private enum submitAndSteal = q{
+private enum submitAndExecute = q{
 
     // See documentation for BaseMixin.shouldSetDone.
     submitNextBatch.shouldSetDone = false;
@@ -2586,22 +2593,22 @@ private enum submitAndSteal = q{
     while( !atomicReadUbyte(doneSubmitting) ) {
         // Try to do parallel foreach tasks in this thread.
         foreach(ref task; tasks) {
-            pool.tryStealDelete( cast(AbstractTask*) &task);
+            pool.tryDeleteExecute( cast(AbstractTask*) &task);
         }
 
-        // All tasks in progress or done unless next
-        // submission task started running.  Try to steal the submission task.
-        pool.tryStealDelete(cast(AbstractTask*) &submitNextBatch);
+        // All tasks in progress or done unless next/ submission task started
+        // running.  Try to execute the submission task.
+        pool.tryDeleteExecute(cast(AbstractTask*) &submitNextBatch);
     }
 
-    // Steal one last time, after they're all submitted.
+    // Try to execute one last time, after they're all submitted.
     foreach(ref task; tasks) {
-        pool.tryStealDelete( cast(AbstractTask*) &task);
+        pool.tryDeleteExecute( cast(AbstractTask*) &task);
     }
 
     foreach(ref task; tasks) {
         try {
-            task.wait();
+            task.force();
         } catch(Throwable e) {
             addToChain(e, firstException, lastException);
         }
@@ -2768,7 +2775,7 @@ private enum string parallelApplyMixin = q{
 
     submitNextBatch = task(&submitJobs);
 
-    mixin(submitAndSteal);
+    mixin(submitAndExecute);
 
     return 0;
 };
@@ -2847,12 +2854,12 @@ unittest {
     uint x;
     auto t = task!refFun(x);
     poolInstance.put(t);
-    t.yieldWait();
+    t.yieldForce();
     assert(t.args[0] == 1);
 
     auto t2 = task(&refFun, x);
     poolInstance.put(t2);
-    t2.yieldWait();
+    t2.yieldForce();
     assert(t2.args[0] == 1);
 
     // Test ref return.
@@ -2864,7 +2871,7 @@ unittest {
     auto t3 = task!makeRef(toInc);
     taskPool.put(t3);//.submit;
     assert(t3.args[0] == 0);
-    t3.spinWait++;
+    t3.spinForce++;
     assert(t3.args[0] == 1);
 
     static void testSafe() @safe {
@@ -2875,7 +2882,7 @@ unittest {
         auto safePool = new TaskPool(0);
         auto t = task(&bump, 1);
         taskPool.put(t);
-        assert(t.yieldWait == 2);
+        assert(t.yieldForce == 2);
         safePool.stop;
     }
 
@@ -3002,7 +3009,7 @@ unittest {
 
     auto myTask = task!(std.math.abs)(-1);
     taskPool.put(myTask);
-    assert(myTask.spinWait == 1);
+    assert(myTask.spinForce == 1);
 
     // Test that worker local storage from one pool receives an index of 0
     // when the index is queried w.r.t. another pool.  The only way to do this
@@ -3078,9 +3085,9 @@ version(parallelismStressTest) {
             }
 
             // Ask for our result.  If the pool has not yet started working on
-            // this task, spinWait() automatically steals it and executes it in this
+            // this task, spinForce() automatically steals it and executes it in this
             // thread.
-            uint mySum = sumFuture.spinWait();
+            uint mySum = sumFuture.spinForce();
             assert(mySum == 999 * 1000 / 2);
 
             // We could have also computed this sum in parallel using parallel
@@ -3187,7 +3194,7 @@ version(parallelismStressTest) {
                     "Success doing matrix stuff that involves nested pool use.");
             });
             poolInstance.put(saySuccess);
-            saySuccess.workWait();
+            saySuccess.workForce();
 
             // A more thorough test of map, reduce:  Find the sum of the square roots of
             // matrix.
@@ -3207,7 +3214,7 @@ version(parallelismStressTest) {
 
             // Test whether tasks work with function pointers.
             auto nanTask = poolInstance.task(&isNaN, 1.0L);
-            assert(nanTask.spinWait == false);
+            assert(nanTask.spinForce == false);
 
             if(poolInstance.size > 0) {
                 // Test work waiting.
@@ -3223,7 +3230,7 @@ version(parallelismStressTest) {
                     poolInstance.put(uselessTask);
                 }
                 foreach(ref uselessTask; uselessTasks) {
-                    uselessTask.workWait();
+                    uselessTask.workForce();
                 }
             }
 
