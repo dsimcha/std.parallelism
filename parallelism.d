@@ -92,12 +92,24 @@ version(Windows) {
         totalCPUs = max(1, cast(uint) si.dwNumberOfProcessors);
     }
 
-} else version(Posix) {
+} else version(linux) {
     import core.sys.posix.unistd;
 
     shared static this() {
         totalCPUs = cast(uint) sysconf(_SC_NPROCESSORS_ONLN );
     }
+} else version(OSX) {
+    extern(C) int sysctlbyname(
+        const char *, void *, size_t *, void *, size_t
+    );
+
+    shared static this() {
+        uint ans;
+        size_t len = uint.sizeof;
+        sysctlbyname("machdep.cpu.core_count\0".ptr, &ans, &len, null, 0);
+        osReportedNcpu = ans;
+    }
+
 } else {
     static assert(0, "Don't know how to get N CPUs on this OS.");
 }
