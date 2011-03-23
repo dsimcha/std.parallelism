@@ -47,6 +47,11 @@ void main() {
     // calculates pi by quadrature using std.parallelism.map and
     // TaskPool.reduce. getTerm() is naturally evaluated in parallel
     // as needed by TaskPool.reduce.
+    //
+    // Timings on an Athlon 64 X2 dual core machine:
+    //
+    // TaskPool.reduce:       12.170 s
+    // std.algorithm.reduce:  24.065 s
 
     immutable n = 1_000_000_000;
     immutable delta = 1.0 / n;
@@ -59,11 +64,6 @@ void main() {
     immutable pi = 4.0 * taskPool.reduce!"a + b"(
         std.algorithm.map!getTerm(iota(n))
     );
-
-    // Timings on an Athlon 64 X2 dual core machine:
-    //
-    // This implementation:                                    12.170 s
-    // Replacing taskPool.reduce with std.algorithm.reduce:    24.065 s
 }
 ---
 
@@ -367,15 +367,11 @@ allows future/promise _parallelism.  In this paradigm, a function (or delegate,
 functor, etc.) is executed in a thread other than the one it was called from.
 The calling thread does not block while the function is being executed.  A call
 to $(D workForce()), $(D yieldForce()), or $(D spinForce()) can be used to
-retrieve the return value after the function is finished executing.
+ensure that execution of the $(D Task) has completed and to obtain the return
+value, if any.
 
-The proper way to create an instance of this struct is via the $(D task())
-function.  See $(D task()) for usage examples.
-
-Notes:  If a $(D Task) has been submitted to a $(D TaskPool) instance, is
-being stored in a stack frame, and has not yet finished, the destructor for
-this struct will automatically call $(D yieldForce()) so that the task can
-finish and the stack frame can be destroyed safely.
+The proper way to create an instance of this struct is via the $(XREF task())
+and $(XREF scopedTask()) function.  See $(D task()) for usage examples.
 
 Function results are returned from $(D yieldForce()), $(D spinForce()) and
 $(D workForce()) by ref.  If $(D fun) returns by ref, the reference will point
@@ -383,7 +379,7 @@ directly to the returned reference of $(D fun).  Otherwise it will point to a
 field in this struct.
 
 Copying of this struct is disabled, since it would provide no useful semantics.
-If you want to pass this struct around, you should do it by reference or
+If you want to pass this struct around, you should do so by reference or
 pointer.
 
 Bugs:  Changes to $(D ref) and $(D out) arguments are not propagated to the
@@ -411,7 +407,8 @@ struct Task(alias fun, Args...) {
     }
     mixin BaseMixin!(TaskState.notStarted) Base;
 
-    TaskPool pool;
+    private TaskPool pool;
+    private bool isScoped;  // True if created with scopedTask.
 
     Args _args;
 
@@ -426,7 +423,9 @@ struct Task(alias fun, Args...) {
         alias _args args;
     }
 
+    /// The type returned by this $(D Task).
     alias typeof(fun(_args)) ReturnType;
+
     static if(!is(ReturnType == void)) {
         static if(is(typeof(&fun(_args)))) {
             // Ref return.
@@ -445,7 +444,7 @@ struct Task(alias fun, Args...) {
         }
     }
 
-    void enforcePool() {
+    private void enforcePool() {
         enforce(this.pool !is null, "Job not submitted yet.");
     }
 
@@ -576,14 +575,28 @@ struct Task(alias fun, Args...) {
         }
     }
 
-    ///  Returns true if the $(D Task) is finished executing.
+    /**
+    Returns true if the $(D Task) is finished executing.
+
+    Throws:  Will rethrow any exception thrown during the execution of the
+             $(D Task).
+    */
     @property bool done() @trusted {
         // Explicitly forwarded for documentation purposes.
         return Base.done;
     }
 
+    /**
+    Creates a new thread for executing this $(D Task), execute it in the
+    newly created thread, then terminate the thread.  This can be used for
+    future/promise parallelism.  See $(XREF task()) for usage example.
+    */
+    void executeInNewThread() @trusted {
+        pool = new TaskPool(cast(AbstractTask*) &this);
+    }
+
     @safe ~this() {
-        if(pool !is null && taskStatus != TaskState.done) {
+        if(isScoped && pool !is null && taskStatus != TaskState.done) {
             yieldForce();
         }
     }
@@ -594,35 +607,68 @@ struct Task(alias fun, Args...) {
 }
 
 /**
-Creates a $(D Task) that calls an alias.
+Creates a $(D Task) on the GC heap that calls an alias.
+
+Returns:  A pointer to the $(D Task).
 
 Examples:
 ---
 // Read two files into memory at the same time.
 import std.file;
 
-// Create and submit a Task object for reading foo.txt.
-auto file1Task = task!read("foo.txt");
-taskPool.put(file1Task);
+void main() {
+    // Create and submit a Task object for reading foo.txt.
+    auto file1Task = task!read("foo.txt");
+    file1Task.executeInNewThread();
 
-// Read bar.txt in parallel.
-auto file2Data = read("bar.txt");
+    // Read bar.txt in parallel.
+    auto file2Data = read("bar.txt");
 
-// Get the results of reading foo.txt.
-auto file1Data = file1Task.yieldForce();
+    // Get the results of reading foo.txt.
+    auto file1Data = file1Task.yieldForce();
+}
 ---
 
-Note:
-This method of creating tasks allocates on the stack and requires an explicit
-submission to the $(D TaskPool) using $(D TaskPool.put()).  It is designed for
-tasks that are to finish before the function in which they are created returns.
-If you want to escape the Task object from the function in which it was created
-or prefer to heap allocate and automatically submit to the pool, see
-$(D TaskPool.task()).
- */
-Task!(fun, Args) task(alias fun, Args...)(Args args) {
+---
+// Sorts an array using a parallel quick sort algorithm.  The first partition
+// is done serially.  Subsequently, both recursion branches are executed in
+// parallel.
+//
+// Timings for sorting an array of 1,000,000 doubles on an Athlon 64 X2
+// dual core machine:
+//
+// This implementation:               176 milliseconds.
+// Equivalent serial implementation:  280 milliseconds
+void parallelSort(T)(T[] data) {
+    // Sort small subarrays serially.
+    if(data.length < 100) {
+         std.algorithm.sort(data);
+         return;
+    }
+
+    // Partition the array.
+    swap(data[$ / 2], data[$ - 1]);
+    auto pivot = data[$ - 1];
+    bool lessThanPivot(T elem) { return elem < pivot; }
+
+    auto greaterEqual = partition!lessThanPivot(data[0..$ - 1]);
+    swap(data[$ - greaterEqual.length - 1], data[$ - 1]);
+
+    auto less = data[0..$ - greaterEqual.length - 1];
+    greaterEqual = data[$ - greaterEqual.length..$];
+
+    // Execute both recursion branches in parallel.
+    auto recurseTask = task!(parallelSort)(greaterEqual);
+    taskPool.put(recurseTask);
+    parallelSort(less);
+    recurseTask.yieldForce();
+}
+---
+*/
+Task!(fun, Args)* task(alias fun, Args...)(Args args) {
     alias Task!(fun, Args) RetType;
-    return RetType(args);
+    auto stack = RetType(args);
+    return moveToHeap(stack);
 }
 
 /**
@@ -637,7 +683,8 @@ ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
 }
 
 /**
-Create a task that calls a function pointer, delegate, or functor.
+Create a task on the GC heap that calls a function pointer, delegate, or
+functor.
 
 Examples:
 ---
@@ -645,36 +692,29 @@ Examples:
 // pointer instead of an alias to represent std.file.read.
 import std.file;
 
-// Create and submit a Task object for reading foo.txt.
-auto file1Task = task(&read, "foo.txt");
-taskPool.put(file1Task);
+void main() {
+    // Create and submit a Task object for reading foo.txt.
+    auto file1Task = task(&read, "foo.txt");
+    file1Task.executeInNewThread();
 
-// Read bar.txt in parallel.
-auto file2Data = read("bar.txt");
+    // Read bar.txt in parallel.
+    auto file2Data = read("bar.txt");
 
-// Get the results of reading foo.txt.
-auto file1Data = file1Task.yieldForce();
+    // Get the results of reading foo.txt.
+    auto file1Data = file1Task.yieldForce();
+}
 ---
 
-Notes:
-This method of creating tasks allocates on the stack and requires an explicit
-submission to the $(D TaskPool) using $(D TaskPool.put()).  It is designed for
-tasks that are to finish before the function in which they are created returns.
-If you want to escape the Task object from the function in which it was created
-or prefer to heap allocate and automatically submit to the pool, see
-$(D TaskPool.task()).
-
-In the case of delegates, this function takes a $(D scope) delegate to prevent
-the allocation of closures, since its intended use is for tasks that will
-be finished before the function in which they're created returns.
-$(D TaskPool.task()) takes a non-scope delegate and will allow the use of
-closures.
+Notes: This function takes a non-scope delegate, meaning it can be
+       used with closures.  If you can't allocate a closure due to objects
+       on the stack that have scoped destruction, see the global function
+       $(D task()), which takes a scope delegate.
  */
-Task!(run, TypeTuple!(F, Args))
-task(F, Args...)(scope F delegateOrFp, Args args)
+Task!(run, TypeTuple!(F, Args))*
+task(F, Args...)(F delegateOrFp, Args args)
 if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
-    alias typeof(return) RT;
-    return RT(delegateOrFp, args);
+    auto stack = Task!(run, TypeTuple!(F, Args))(delegateOrFp, args);
+    return moveToHeap(stack);
 }
 
 /**
@@ -693,11 +733,53 @@ restrictions:
 
 4.  $(D fun) must return by value, not by reference.
 */
-@trusted Task!(run, TypeTuple!(F, Args))
+@trusted Task!(run, TypeTuple!(F, Args))*
 task(F, Args...)(F fun, Args args)
 if(is(typeof(fun(args))) && isSafeTask!F) {
-    alias typeof(return) RT;
-    return RT(fun, args);
+    auto stack = Task!(run, TypeTuple!(F, Args))(fun, args);
+    return moveToHeap(stack);
+}
+
+/**
+These functions allow the creation of Task objects that are returned by value.
+This might be preferred over $(D task()) when:
+
+1.  A $(D Task) that calls a delegate is being created and a closure cannot
+    be allocated due to objects on the stack that have scoped destruction.
+    The delegate overload of $(D scopedTask) takes a $(D scope) delegate.
+
+2.  As a micro-optimization, to avoid the heap allocation associated with
+    $(D task()) or with the creation of a closure.
+
+Examples are identical to those for $(D task()).
+
+Notes:  $(D Task) objects created using $(D scopedTask()) will automatically
+call $(D Task.yieldForce()) in their destructor if necessary to ensure that
+the $(D Task) is complete before the stack frame on which it resides is
+destroyed.
+*/
+Task!(fun, Args) scopedTask(alias fun, Args...)(Args args) {
+    auto ret = typeof(return)(args);
+    ret.isScoped = true;
+    return ret;
+}
+
+/// Ditto
+Task!(run, TypeTuple!(F, Args))
+scopedTask(F, Args...)(scope F delegateOrFp, Args args)
+if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
+    auto ret = typeof(return)(delegateOrFp, args);
+    ret.isScoped = true;
+    return ret;
+}
+
+/// Ditto
+@trusted Task!(run, TypeTuple!(F, Args))
+scopedTask(F, Args...)(F fun, Args args)
+if(is(typeof(fun(args))) && isSafeTask!F) {
+    auto ret = typeof(return)(fun, args);
+    ret.isScoped = true;
+    return ret;
 }
 
 /**
@@ -722,7 +804,17 @@ are waiting on.
  */
 final class TaskPool {
 private:
-    Thread[] pool;
+
+    // A pool can either be a regular pool or a single-task pool.  A
+    // single-task pool is a dummy pool that's fired up for
+    // Task.executeInNewThread().
+    bool isSingleTask;
+
+    union {
+        Thread[] pool;
+        Thread singleTaskThread;
+    }
+
     AbstractTask* head;
     AbstractTask* tail;
     PoolState status = PoolState.running;  // All operations on this are done atomically.
@@ -736,7 +828,7 @@ private:
     // The index of the current thread.
     static size_t threadIndex;
 
-    // The index of the first thread in the next instance.
+    // The index of the first thread in this instance.
     immutable size_t instanceStartIndex;
 
     // The index that the next thread to be initialized in this pool will have.
@@ -754,9 +846,11 @@ private:
         assert(job.prev is null);
 
         scope(exit) {
-            lock();
-            notifyWaiters();
-            unlock();
+            if(!isSingleTask) {
+                lock();
+                notifyWaiters();
+                unlock();
+            }
         }
 
         try {
@@ -770,6 +864,17 @@ private:
         }
     }
 
+    // This function is used for dummy pools created by Task.executeInNewThread().
+    void doSingleTask() {
+        // No synchronization.  Pool is guaranteed to only have one thread.
+        assert(head);
+        auto t = head;
+        t.next = t.prev = head = null;
+        doJob(t);
+    }
+
+    // This work loop is used for a "normal" task pool where a worker thread
+    // does more than one task.
     void workLoop() {
         // Initialize thread index.
         lock();
@@ -857,6 +962,8 @@ private:
             assert(returned.prev is null);
         }
     } body {
+        if(isSingleTask) return null;
+
         AbstractTask* returned = head;
         if (head !is null) {
             head = head.next;
@@ -902,6 +1009,8 @@ private:
     // Same as trySteal, but also deletes the task from the queue so the
     // Task object can be recycled.
     bool tryDeleteExecute(AbstractTask* toSteal) {
+        if(isSingleTask) return false;
+
         if( !deleteItem(toSteal) ) {
             return false;
         }
@@ -927,31 +1036,35 @@ private:
     }
 
     void lock() {
-        mutex.lock();
+        if(!isSingleTask) mutex.lock();
     }
 
     void unlock() {
-        mutex.unlock();
+        if(!isSingleTask) mutex.unlock();
     }
 
     void wait() {
-        workerCondition.wait();
+        if(!isSingleTask) workerCondition.wait();
     }
 
     void notify() {
-        workerCondition.notify();
+        if(!isSingleTask) workerCondition.notify();
     }
 
     void notifyAll() {
-        workerCondition.notifyAll();
+        if(!isSingleTask) workerCondition.notifyAll();
     }
 
     void waitUntilCompletion() {
-        waiterCondition.wait();
+        if(isSingleTask) {
+            singleTaskThread.join();
+        } else {
+            waiterCondition.wait();
+        }
     }
 
     void notifyWaiters() {
-        waiterCondition.notifyAll();
+        if(!isSingleTask) waiterCondition.notifyAll();
     }
 
     /*
@@ -971,6 +1084,22 @@ private:
         return (rawInd >= instanceStartIndex &&
                 rawInd < instanceStartIndex + size) ?
                 (rawInd - instanceStartIndex + 1) : 0;
+    }
+
+    // Private constructor for creating dummy pools that only have one thread,
+    // only execute one Task, and then terminate.  This is used for
+    // Task.executeInNewThread().
+    this(AbstractTask* task) {
+        assert(task);
+
+        // Dummy value, not used.
+        instanceStartIndex = 0;
+
+        this.isSingleTask = true;
+        task.taskStatus = TaskState.inProgress;
+        this.head = task;
+        singleTaskThread = new Thread(&doSingleTask);
+        singleTaskThread.start();
     }
 
 public:
@@ -1041,14 +1170,14 @@ public:
     }
 
     // Same thing, but use the default work unit size.
+    //
+    // Timings on an Athlon 64 X2 dual core machine:
+    //
+    // Parallel foreach:  388 milliseconds
+    // Regular foreach:   619 milliseconds
     foreach(i, ref elem; taskPool.parallel(logs)) {
         elem = log(i + 1.0);
     }
-
-    // Timings on an Athlon 64 X2 dual core machine:
-    //
-    // Parallel foreach implementation (above):  388 milliseconds
-    // Regular foreach implementation:           619 milliseconds
     ---
 
     Notes:
@@ -1112,12 +1241,12 @@ public:
     auto numbers = iota(100_000_000);
 
     // Find the square roots of numbers.
-    auto squareRoots = taskPool.map!sqrt(numbers);
-
+    //
     // Timings on an Athlon 64 X2 dual core machine:
     //
     // Parallel map:                         0.802 s
     // Equivalent serial implementation:     1.768 s
+    auto squareRoots = taskPool.map!sqrt(numbers);
     ---
 
     Immediately after the range argument, an optional work unit size argument
@@ -1262,7 +1391,7 @@ public:
                 unlock();
             }
 
-            submitNextBatch = .task(&submitJobs);
+            submitNextBatch = .scopedTask(&submitJobs);
 
             // The submitAndExecute mixin relies on the TaskPool instance
             // being called pool.
@@ -1697,13 +1826,13 @@ public:
     Examples:
     ---
     // Find the sum of squares of a range in parallel.
-    auto nums = iota(100_000_000);
-    auto mySum = taskPool.reduce!"a + b * b"(0.0, nums);
-
+    //
     // Timings on an Athlon 64 X2 dual core machine:
     //
     // Parallel reduce:                     0.329 s
     // Using std.algorithm.reduce instead:  0.790 s
+    auto nums = iota(100_000_000);
+    auto mySum = taskPool.reduce!"a + b * b"(0.0, nums);
 
     // Find both the min and max of nums.  This example illustrates the
     // mechanics of using reduce() with multiple functions.  However, this
@@ -2195,7 +2324,8 @@ public:
     }
 
     /**
-    Put a $(D Task) object on the back of the task queue.
+    Put a $(D Task) object on the back of the task queue.  The $(D Task)
+    object may be passed by either pointer or reference.
 
     Example:
     ---
@@ -2218,6 +2348,12 @@ public:
     void put(alias fun, Args...)(ref Task!(fun, Args) task) @trusted {
         task.pool = this;
         abstractPut( cast(AbstractTask*) &task);
+    }
+
+    /// Ditto
+    void put(alias fun, Args...)(Task!(fun, Args)* task) @trusted {
+        enforce(task !is null, "Cannot put a null Task on a TaskPool queue.");
+        put(*task);
     }
 
     /**
@@ -2274,72 +2410,6 @@ public:
             }
         }
     }
-
-
-    /**
-    Convenience method that automatically creates a $(D Task) calling an alias
-    on the GC heap and adds it to the back of the task queue.
-
-    Returns:  A pointer to the $(D Task) object.
-
-    Examples:
-    ---
-    // Read two files into memory at the same time.
-    import std.file;
-
-    // Create and submit a Task object for reading foo.txt.
-    auto file1Task = taskPool.task!read("foo.txt");
-
-    // Read bar.txt in parallel.
-    auto file2Data = read("bar.txt");
-
-    // Get the results of reading foo.txt.
-    auto file1Data = file1Task.yieldForce();
-    ---
-     */
-    Task!(fun, Args)* task(alias fun, Args...)(Args args) {
-        auto stuff = .task!(fun)(args);
-        auto ret = moveToHeap(stuff);
-        put(*ret);
-        return ret;
-    }
-
-    /**
-    Convenience method that automatically creates a $(D Task) calling a delegate,
-    function pointer, or functor on the GC heap and adds it to the back of
-    the task queue.
-
-    Example:
-    ---
-    // Read two files in at the same time again, but this time use a function
-    // pointer instead of an alias to represent std.file.read.
-    import std.file;
-
-    // Create and submit a Task object for reading foo.txt.
-    auto file1Task = taskPool.task(&read, "foo.txt");
-
-    // Read bar.txt in parallel.
-    auto file2Data = read("bar.txt");
-
-    // Get the results of reading foo.txt.
-    auto file1Data = file1Task.yieldForce();
-    ---
-
-    Returns:  A pointer to the $(D Task) object.
-
-    Note:  This function takes a non-scope delegate, meaning it can be
-    used with closures.  If you can't allocate a closure due to objects
-    on the stack that have scoped destruction, see the global function
-    $(D task()), which takes a scope delegate.
-     */
-     Task!(run, TypeTuple!(F, Args))*
-     task(F, Args...)(F delegateOrFp, Args args)
-     if(is(ReturnType!(F))) {
-         auto stuff = .task(delegateOrFp, args);
-         auto ptr = moveToHeap(stuff);
-         put(*ptr);
-         return ptr;
-     }
 }
 
 /**
@@ -2798,7 +2868,7 @@ private enum string parallelApplyMixin = q{
         pool.unlock();
     }
 
-    submitNextBatch = task(&submitJobs);
+    submitNextBatch = scopedTask(&submitJobs);
 
     mixin(submitAndExecute);
 
@@ -2877,6 +2947,8 @@ unittest {
     }
 
     uint x;
+
+    // Test task().
     auto t = task!refFun(x);
     poolInstance.put(t);
     t.yieldForce();
@@ -2886,6 +2958,23 @@ unittest {
     poolInstance.put(t2);
     t2.yieldForce();
     assert(t2.args[0] == 1);
+
+    // Test scopedTask().
+    auto st = scopedTask!refFun(x);
+    poolInstance.put(st);
+    st.yieldForce();
+    assert(st.args[0] == 1);
+
+    auto st2 = scopedTask(&refFun, x);
+    poolInstance.put(st2);
+    st2.yieldForce();
+    assert(st2.args[0] == 1);
+
+    // Test executeInNewThread().
+    auto ct = scopedTask!refFun(x);
+    ct.executeInNewThread();
+    ct.yieldForce();
+    assert(ct.args[0] == 1);
 
     // Test ref return.
     uint toInc = 0;
