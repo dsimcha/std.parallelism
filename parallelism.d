@@ -17,17 +17,18 @@ represent an additional level of abstraction over $(D Task) in that they
 automatically create one or more $(D Task) objects, or closely related types
 that are conceptually identical but not part of the public API.
 
-After creation, $(D Task) objects are submitted to a $(D TaskPool) for execution.
-A $(D TaskPool) encapsulates a task queue and its associated worker threads.
-A task queue is a simple FIFO queue of $(D Task) objects that have been
-submitted to the $(D TaskPool) and are awaiting execution.  A worker thread is
-a thread that is associated with exactly one task queue.  It executes the
-$(D Task) at the front of its task queue when the task queue has work available,
-or sleeps when no work is available.  Each task queue, in turn, is associated
-with zero or more worker threads.  If the results of a $(D Task) are needed in
-the submitting thread before execution by a worker thread has begun, the
-$(D Task) can be removed from the task queue and executed immediately in the
-submitting thread rather than in a worker thread.
+After creation, $(D Task) objects may be submitted to a $(D TaskPool) for
+execution.  A $(D TaskPool) encapsulates a task queue and its associated worker
+threads.  Its purpose is to efficiently map a large number of $(D Task)s onto
+a smaller number of threads.  A task queue is a simple FIFO queue of $(D Task)
+objects that have been submitted to the $(D TaskPool) and are awaiting
+execution.  A worker thread is a thread that is associated with exactly one
+task queue.  It executes the $(D Task) at the front of its task queue when the
+task queue has work available, or sleeps when no work is available.  Each task
+queue, in turn, is associated with zero or more worker threads.  If the results
+of a $(D Task) are needed in the submitting thread before execution by a worker
+thread has begun, the $(D Task) can be removed from the task queue and executed
+immediately in the submitting thread rather than in a worker thread.
 
 Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
           this module allow unchecked data sharing between threads and cannot
