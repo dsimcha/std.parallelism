@@ -718,8 +718,8 @@ void main() {
 
 Notes: This function takes a non-scope delegate, meaning it can be
        used with closures.  If you can't allocate a closure due to objects
-       on the stack that have scoped destruction, see the global function
-       $(D task), which takes a scope delegate.
+       on the stack that have scoped destruction, see $(D scopedTask), which
+       takes a scope delegate.
  */
 Task!(run, TypeTuple!(F, Args))*
 task(F, Args...)(F delegateOrFp, Args args)
