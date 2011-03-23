@@ -366,15 +366,16 @@ executed in parallel with any other $(D Task).  Using this struct directly
 allows future/promise _parallelism.  In this paradigm, a function (or delegate,
 functor, etc.) is executed in a thread other than the one it was called from.
 The calling thread does not block while the function is being executed.  A call
-to $(D workForce()), $(D yieldForce()), or $(D spinForce()) can be used to
+to $(D workForce), $(D yieldForce), or $(D spinForce) can be used to
 ensure that execution of the $(D Task) has completed and to obtain the return
 value, if any.
 
-The proper way to create an instance of this struct is via the $(XREF task())
-and $(XREF scopedTask()) function.  See $(D task()) for usage examples.
+The proper way to create an instance of this struct is via the
+$(XREF parallelism, task) and $(XREF parallelism, scopedTask) function.
+See $(D task) for usage examples.
 
-Function results are returned from $(D yieldForce()), $(D spinForce()) and
-$(D workForce()) by ref.  If $(D fun) returns by ref, the reference will point
+Function results are returned from $(D yieldForce), $(D spinForce) and
+$(D workForce) by ref.  If $(D fun) returns by ref, the reference will point
 directly to the returned reference of $(D fun).  Otherwise it will point to a
 field in this struct.
 
@@ -589,7 +590,8 @@ struct Task(alias fun, Args...) {
     /**
     Creates a new thread for executing this $(D Task), execute it in the
     newly created thread, then terminate the thread.  This can be used for
-    future/promise parallelism.  See $(XREF task()) for usage example.
+    future/promise parallelism.  See $(XREF parallelism, task) for usage
+    example.
     */
     void executeInNewThread() @trusted {
         pool = new TaskPool(cast(AbstractTask*) &this);
@@ -708,7 +710,7 @@ void main() {
 Notes: This function takes a non-scope delegate, meaning it can be
        used with closures.  If you can't allocate a closure due to objects
        on the stack that have scoped destruction, see the global function
-       $(D task()), which takes a scope delegate.
+       $(D task), which takes a scope delegate.
  */
 Task!(run, TypeTuple!(F, Args))*
 task(F, Args...)(F delegateOrFp, Args args)
@@ -720,7 +722,7 @@ if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
 /**
 Safe version of Task, usable from $(D @safe) code.  Usage mechanics are
 identical to the non-@safe case, but safety introduces the following
-restrictions:
+_restrictions:
 
 1.  $(D F) must not have any unshared aliasing.  Basically, this means that it
     may not be an unshared delegate.  This also precludes accepting template
@@ -742,19 +744,23 @@ if(is(typeof(fun(args))) && isSafeTask!F) {
 
 /**
 These functions allow the creation of Task objects that are returned by value.
-This might be preferred over $(D task()) when:
+The lifetime of a $(D Task) created by $(D scopedTask) cannot exceed the
+lifetime of the scope in which it was created.
 
-1.  A $(D Task) that calls a delegate is being created and a closure cannot
-    be allocated due to objects on the stack that have scoped destruction.
-    The delegate overload of $(D scopedTask) takes a $(D scope) delegate.
+$(D scopedTask) might be preferred over $(D task):
+
+1.  When a $(D Task) that calls a delegate is being created and a closure
+    cannot be allocated due to objects on the stack that have scoped
+    destruction.  The delegate overload of $(D scopedTask) takes a $(D scope)
+    delegate.
 
 2.  As a micro-optimization, to avoid the heap allocation associated with
-    $(D task()) or with the creation of a closure.
+    $(D task) or with the creation of a closure.
 
-Examples are identical to those for $(D task()).
+Usage is otherwise identical to $(D task).
 
-Notes:  $(D Task) objects created using $(D scopedTask()) will automatically
-call $(D Task.yieldForce()) in their destructor if necessary to ensure that
+Notes:  $(D Task) objects created using $(D scopedTask) will automatically
+call $(D Task.yieldForce) in their destructor if necessary to ensure that
 the $(D Task) is complete before the stack frame on which it resides is
 destroyed.
 */
@@ -1436,11 +1442,11 @@ public:
     Notes:
 
     If a range returned by $(D lazyMap) or $(D asyncBuf) is used as an input to
-    $(D lazyMap()), then as an optimization the copying from the output buffer
+    $(D lazyMap), then as an optimization the copying from the output buffer
     of the first range to the input buffer of the second range is elided, even
     though the ranges returned by $(D lazyMap) and $(D asyncBuf) are input
     ranges.  However, this means that the $(D bufSize) parameter passed to the
-    current call to $(D lazyMap()) will be ignored and the size of the buffer
+    current call to $(D lazyMap) will be ignored and the size of the buffer
     will be the buffer size of $(D range).
 
     Examples:
@@ -1461,7 +1467,7 @@ public:
     ---
 
     Exception handling:  Any exceptions thrown while iterating over $(D range)
-    or computing the map function are re-thrown on a call to $(D popFront()).
+    or computing the map function are re-thrown on a call to $(D popFront).
     In the case of exceptions thrown while computing the map function,
     the exceptions are chained as in $(D TaskPool.map).
     */
@@ -1693,7 +1699,7 @@ public:
     ---
 
     Exception handling:  Any exceptions thrown while iterating over $(D range)
-    are re-thrown on a call to $(D popFront()).
+    are re-thrown on a call to $(D popFront).
     */
     auto asyncBuf(R)(R range, size_t bufSize = 100) {
         static final class AsyncBuf {
@@ -2108,13 +2114,13 @@ public:
     public:
         /**
         Get the current thread's instance.  Returns by reference.
-        Note that calling $(D get()) from any thread
+        Note that calling $(D get) from any thread
         outside the pool that created this instance will return the
         same reference, so an instance of worker-local storage should only be
         accessed from one thread outside the pool that created it.  If this
         rule is violated, undefined behavior will result.
 
-        If assertions are enabled and $(D toRange()) has been called, then this
+        If assertions are enabled and $(D toRange) has been called, then this
         WorkerLocalStorage instance is no longer worker-local and an assertion
         failure will result when calling this method.  This is not checked
         when assertions are disabled for performance reasons.
@@ -2148,7 +2154,7 @@ public:
 
         Calling this function will also set a flag indicating
         that this struct is no longer thread-local, and attempting to use the
-        get() method again will result in an assertion failure if assertions
+        $(D get) method again will result in an assertion failure if assertions
         are enabled.
          */
         WorkerLocalStorageRange!T toRange() @property {
@@ -2309,7 +2315,7 @@ public:
 
     /**
     Instructs worker threads to terminate when the queue becomes empty as
-    in $(D join()) but does not block.
+    in $(D join) but does not block.
      */
     void finish() @trusted {
         lock();
@@ -2362,8 +2368,8 @@ public:
     non-daemon threads have terminated.  A non-daemon thread will prevent
     a program from terminating as long as it has not terminated.
 
-    If any $(D TaskPool) with non-daemon threads is active, either $(D stop()),
-    $(D join()) or $(D finish()) must be called on it before the program
+    If any $(D TaskPool) with non-daemon threads is active, either $(D stop),
+    $(D join) or $(D finish) must be called on it before the program
     can terminate.
 
     The worker treads in the default $(D TaskPool) instance returned by the
@@ -2391,7 +2397,7 @@ public:
     /**
     These functions allow getting and setting the OS scheduling priority of
     the worker threads in this $(D TaskPool).  They simply forward to
-    $(D core.thread.priority()), so a given priority value here means the
+    $(D core.thread.priority), so a given priority value here means the
     same thing as an identical priority value in $(D core.thread).
 
     Note:  For a size zero pool, the getter arbitrarily returns
@@ -2416,8 +2422,8 @@ public:
 Returns a lazily initialized default instantiation of $(D TaskPool).
 This function can safely be called concurrently from multiple non-worker
 threads.  The worker threads in this pool are daemon threads, meaning that it
-is not necessary to explicitly call $(D taskPool.join()), $(D taskPool.stop())
-or $(D taskPool.finish()) before terminating the main thread.
+is not necessary to explicitly call $(D taskPool.join), $(D taskPool.stop)
+or $(D taskPool.finish) before terminating the main thread.
 
 One instance of this pool is shared across the entire program.
 */
@@ -2446,9 +2452,9 @@ shared static this() {
 
 /**
 These properties get and set the number of worker threads in the default pool
-returned by $(D taskPool()).  If the setter is never called, the default value
+returned by $(D taskPool).  If the setter is never called, the default value
 is $(D totalCPUs) - 1  Any changes made via the setter after the default
-pool is initialized via the first call to $(D taskPool()) have no effect
+pool is initialized via the first call to $(D taskPool) have no effect
 on the number of worker threads in the default pool.
 */
 @property uint defaultPoolThreads() @trusted {
@@ -2462,7 +2468,7 @@ on the number of worker threads in the default pool.
 }
 
 /**
-Convenience functions that forwards to taskPool.parallel().  The only
+Convenience functions that forwards to $(D taskPool.parallel).  The only
 purpose of these is to make parallel foreach less verbose and more
 readable.
 
