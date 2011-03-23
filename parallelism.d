@@ -592,9 +592,10 @@ struct Task(alias fun, Args...) {
     /**
     Creates a new thread for executing this $(D Task), execute it in the
     newly created thread, then terminate the thread.  This can be used for
-    future/promise parallelism.  A priority may optionally be given to the
-    $(D Task).  If one is provided, its value is forwarded to
-    $(D TaskPool.priority). See $(XREF parallelism, task) for usage example.
+    future/promise parallelism.  An explicit priority may optionally be given
+    to the $(D Task).  If one is provided, its value is forwarded to
+    $(D core.thread.Thread.priority). See $(XREF parallelism, task) for
+    usage example.
     */
     void executeInNewThread() @trusted {
         pool = new TaskPool(cast(AbstractTask*) &this);
@@ -2411,7 +2412,7 @@ public:
     /**
     These functions allow getting and setting the OS scheduling priority of
     the worker threads in this $(D TaskPool).  They simply forward to
-    $(D core.thread.priority), so a given priority value here means the
+    $(D core.thread.Thread.priority), so a given priority value here means the
     same thing as an identical priority value in $(D core.thread).
 
     Note:  For a size zero pool, the getter arbitrarily returns
