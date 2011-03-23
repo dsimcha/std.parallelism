@@ -17,18 +17,19 @@ represent an additional level of abstraction over $(D Task) in that they
 automatically create one or more $(D Task) objects, or closely related types
 that are conceptually identical but not part of the public API.
 
-After creation, $(D Task) objects may be submitted to a $(D TaskPool) for
-execution.  A $(D TaskPool) encapsulates a task queue and its associated worker
-threads.  Its purpose is to efficiently map a large number of $(D Task)s onto
-a smaller number of threads.  A task queue is a simple FIFO queue of $(D Task)
-objects that have been submitted to the $(D TaskPool) and are awaiting
-execution.  A worker thread is a thread that is associated with exactly one
-task queue.  It executes the $(D Task) at the front of its task queue when the
-task queue has work available, or sleeps when no work is available.  Each task
-queue, in turn, is associated with zero or more worker threads.  If the results
-of a $(D Task) are needed in the submitting thread before execution by a worker
-thread has begun, the $(D Task) can be removed from the task queue and executed
-immediately in the submitting thread rather than in a worker thread.
+After creation, $(D Task) objects may be executed in a new thread, or submitted
+to a $(D TaskPool) for execution.  A $(D TaskPool) encapsulates a task queue
+and its associated worker threads.  Its purpose is to efficiently map a large
+number of $(D Task)s onto a smaller number of threads.  A task queue is a
+simple FIFO queue of $(D Task) objects that have been submitted to the
+$(D TaskPool) and are awaiting execution.  A worker thread is a thread that
+is associated with exactly one task queue.  It executes the $(D Task) at the
+front of its task queue when the task queue has work available, or sleeps when
+no work is available.  Each task queue, in turn, is associated with zero or
+more worker threads.  If the results of a $(D Task) are needed in the
+submitting thread before execution by a worker thread has begun, the $(D Task)
+can be removed from the task queue and executed immediately in the submitting
+thread rather than in a worker thread.
 
 Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
           this module allow unchecked data sharing between threads and cannot
@@ -591,11 +592,17 @@ struct Task(alias fun, Args...) {
     /**
     Creates a new thread for executing this $(D Task), execute it in the
     newly created thread, then terminate the thread.  This can be used for
-    future/promise parallelism.  See $(XREF parallelism, task) for usage
-    example.
+    future/promise parallelism.  A priority may optionally be given to the
+    $(D Task).  If one is provided, its value is forwarded to
+    $(D TaskPool.priority). See $(XREF parallelism, task) for usage example.
     */
     void executeInNewThread() @trusted {
         pool = new TaskPool(cast(AbstractTask*) &this);
+    }
+
+    /// Ditto
+    void executeInNewThread(int priority) @trusted {
+        pool = new TaskPool(cast(AbstractTask*) &this, priority);
     }
 
     @safe ~this() {
@@ -798,9 +805,10 @@ immutable uint totalCPUs;
 /**
 This class encapsulates a task queue and a set of worker threads.  A task
 queue is a simple FIFO queue of $(D Task) objects that have been submitted
-to the $(D TaskPool) but for which execution has not yet begun.  A worker
-thread is a thread that executes the $(D Task) at the front of the task queue
-when one is available and sleeps when the task queue is empty.
+to the $(D TaskPool) but for which execution has not yet begun.  Its purpose
+is to efficiently map a large number of $(D Task)s onto a smaller number of
+threads.  A worker thread is a thread that executes the $(D Task) at the front
+of the task queue when one is available and sleeps when the task queue is empty.
 
 This class should usually be used via the default global instantiation,
 available via the global $(D taskPool) property, which is described below.
@@ -1096,7 +1104,7 @@ private:
     // Private constructor for creating dummy pools that only have one thread,
     // only execute one Task, and then terminate.  This is used for
     // Task.executeInNewThread().
-    this(AbstractTask* task) {
+    this(AbstractTask* task, int priority = int.max) {
         assert(task);
 
         // Dummy value, not used.
@@ -1106,6 +1114,11 @@ private:
         task.taskStatus = TaskState.inProgress;
         this.head = task;
         singleTaskThread = new Thread(&doSingleTask);
+
+        if(priority != int.max) {
+            singleTaskThread.priority = priority;
+        }
+
         singleTaskThread.start();
     }
 
