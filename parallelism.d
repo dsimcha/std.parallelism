@@ -17,7 +17,7 @@ represent an additional level of abstraction over $(D Task) in that they
 automatically create one or more $(D Task) objects, or closely related types
 that are conceptually identical but not part of the public API.
 
-After creation, $(D Task) objects may be executed in a new thread, or submitted
+After creation, a $(D Task) object may be executed in a new thread, or submitted
 to a $(D TaskPool) for execution.  A $(D TaskPool) encapsulates a task queue
 and its associated worker threads.  Its purpose is to efficiently map a large
 number of $(D Task)s onto a smaller number of threads.  A task queue is a
@@ -28,11 +28,11 @@ front of its task queue when the task queue has work available, or sleeps when
 no work is available.  Each task queue, in turn, is associated with zero or
 more worker threads.  If the results of a $(D Task) are needed in the
 submitting thread before execution by a worker thread has begun, the $(D Task)
-can be removed from the task queue and executed immediately in the submitting
-thread rather than in a worker thread.
+can be removed from the task queue and executed immediately in the thread where
+the result is needed rather than in a worker thread.
 
 Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
-          this module allow unchecked data sharing between threads and cannot
+          this module allow implicit data sharing between threads and cannot
           guarantee that client code is free from low level data races.
           Artifacts that are provably free from such issues are marked
           $(D @safe) or $(D @trusted).
@@ -75,9 +75,9 @@ License:    $(WEB boost.org/LICENSE_1_0.txt, Boost License 1.0)
 */
 module std.parallelism;
 
-import core.thread, core.cpuid, std.algorithm, std.range, std.c.stdlib, std.stdio,
-    std.exception, std.functional, std.conv, std.math, core.memory, std.traits,
-    std.typetuple, core.stdc.string, std.typecons;
+import core.thread, core.cpuid, std.algorithm, std.range, std.c.stdlib,
+    std.stdio, std.exception, std.functional, std.conv, std.math, core.memory,
+    std.traits, std.typetuple, core.stdc.string, std.typecons;
 
 import core.sync.condition, core.sync.mutex, core.atomic;
 
@@ -190,6 +190,9 @@ private bool atomicCasUbyte(ref ubyte stuff, ubyte testVal, ubyte newVal) {
     return core.atomic.cas(cast(shared) &stuff, testVal, newVal);
 }
 
+// TODO:  Put something more efficient here, or lobby for it to be put in
+// core.atomic.  This should really just use lock; inc; on x86.  This function
+// is not called frequently, though, so it might not matter in practice.
 private void atomicIncUint(ref uint num) {
     atomicOp!"+="(num, 1U);
 }
@@ -215,29 +218,49 @@ private template noUnsharedAliasing(T) {
     enum bool noUnsharedAliasing = !hasUnsharedAliasing!T;
 }
 
+// This template tests whether a function may be executed in parallel from
+// @safe code via Task.executeInNewThread().  There is an additional
+// requirement for executing it via a TaskPool.  (See isSafeReturn).
 private template isSafeTask(F) {
     enum bool isSafeTask =
-    (!hasUnsharedAliasing!(ReturnType!F) ||
-        (functionAttributes!F & FunctionAttribute.PURE)) &&
-    !(functionAttributes!F & FunctionAttribute.REF) &&
-    (isFunctionPointer!F || !hasUnsharedAliasing!F) &&
-    allSatisfy!(noUnsharedAliasing, ParameterTypeTuple!F);
+        ((functionAttributes!(F) & FunctionAttribute.SAFE) ||
+        (functionAttributes!(F) & FunctionAttribute.TRUSTED)) &&
+        !(functionAttributes!F & FunctionAttribute.REF) &&
+        (isFunctionPointer!F || !hasUnsharedAliasing!F) &&
+        allSatisfy!(noUnsharedAliasing, ParameterTypeTuple!F);
 }
 
 unittest {
-    static assert(isSafeTask!(void function()));
-    static assert(isSafeTask!(void function(uint, string)));
-    static assert(!isSafeTask!(void function(uint, char[])));
+    alias void function() @safe F1;
+    alias void function() F2;
+    alias void function(uint, string) @trusted F3;
+    alias void function(uint, char[]) F4;
 
-    alias uint[] function(uint, string) pure F1;
-    alias uint[] function(uint, string) F2;
     static assert(isSafeTask!(F1));
     static assert(!isSafeTask!(F2));
+    static assert(isSafeTask!(F3));
+    static assert(!isSafeTask!(F4));
+
+    alias uint[] function(uint, string) pure @trusted F5;
+    static assert(isSafeTask!(F5));
 }
 
-
-private void sleepMillisecond(long nMilliseconds) {
-    Thread.sleep(nMilliseconds * 10_000);
+// This function decides whether Tasks that meet all of the other requirements
+// for being executed from @safe code can be executed on a TaskPool.
+// When executing via TaskPool, it's theoretically possible
+// to return a value that is also pointed to by a worker thread's thread local
+// storage.  When executing from executeInNewThread(), the thread that executed
+// the Task is terminated by the time the return value is visible in the calling
+// thread, so this is a non-issue.  It's also a non-issue for pure functions
+// since they can't read global state.
+private template isSafeReturn(T) {
+    static if(!hasUnsharedAliasing!(T.ReturnType)) {
+        enum isSafeReturn = true;
+    } else static if(T.isPure) {
+        enum isSafeReturn = true;
+    } else {
+        enum isSafeReturn = false;
+    }
 }
 
 private T* moveToHeap(T)(ref T object) {
@@ -265,6 +288,9 @@ private enum TaskState : ubyte {
     done
 }
 
+// This is conceptually the base class for all Task types.  The only Task type
+// that is public is the one actually named Task.  There is also a slightly
+// customized ParallelForeachTask and MapTask.
 private template BaseMixin(ubyte initTaskStatus) {
     AbstractTask* prev;
     AbstractTask* next;
@@ -281,8 +307,8 @@ private template BaseMixin(ubyte initTaskStatus) {
 
     /* Kludge:  Some tasks need to re-submit themselves after they finish.
      * In this case, they will set themselves to TaskState.notStarted before
-     * resubmitting themselves.  Setting this flag to false prevents the work
-     * stealing loop from setting them to done.*/
+     * resubmitting themselves.  Setting this flag to false prevents them
+     * from being set to done in tryDeleteExecute.*/
     bool shouldSetDone = true;
 
     bool done() @property {
@@ -298,7 +324,7 @@ private template BaseMixin(ubyte initTaskStatus) {
     }
 }
 
-// The base "class" for all of the other tasks.
+// This is physically base "class" for all of the other tasks.
 private struct AbstractTask {
     mixin BaseMixin!(TaskState.notStarted);
 
@@ -356,7 +382,6 @@ private template ElementsCompatible(R, A) {
     static if(!isArray!A) {
         enum bool ElementsCompatible = false;
     } else {
-        pragma(msg, ElementType!R.stringof ~ '\t' ~ ElementType!A.stringof);
         enum bool ElementsCompatible =
             is(ElementType!R : ElementType!A);
     }
@@ -422,11 +447,29 @@ struct Task(alias fun, Args...) {
     */
     static if(__traits(isSame, fun, run)) {
         alias _args[1..$] args;
+
+        static if(isFunctionPointer!(_args[0])) {
+            // The purpose of this value is to decide whether functions whose
+            // return values have unshared aliasing can be executed via
+            // TaskPool from @safe code.  See isSafeReturn.
+            enum bool isPure =
+                functionAttributes!(Args[0]) & FunctionAttribute.PURE;
+        } else {
+            // BUG:  Should check this for delegates too, but std.traits
+            //       apparently doesn't allow this and isPure is irrelevant
+            //       for delegates anyhow.
+            enum bool isPure = false;
+        }
+
     } else {
         alias _args args;
+
+        // We already know that we can't execute aliases in @safe code, so
+        // just put a dummy value here.
+        enum bool isPure = false;
     }
 
-    /// The type returned by this $(D Task).
+    /// The return type of the function called by this $(D Task).
     alias typeof(fun(_args)) ReturnType;
 
     static if(!is(ReturnType == void)) {
@@ -464,7 +507,7 @@ struct Task(alias fun, Args...) {
     an exception, rethrow that exception.
 
     This function should be used when you expect the result of the
-    task to be available relatively quickly, on a timescale shorter
+    $(D Task) to be available relatively quickly, on a timescale shorter
     than that of an OS context switch.
      */
     @property ref ReturnType spinForce() @trusted {
@@ -484,7 +527,7 @@ struct Task(alias fun, Args...) {
     }
 
     /**
-    If the task isn't started yet, execute it in the current thread.
+    If the $(D Task) isn't started yet, execute it in the current thread.
     If it's done, return its return value, if any.  If it's in progress,
     wait on a condition variable.  If it threw an exception, rethrow that
     exception.
@@ -534,7 +577,7 @@ struct Task(alias fun, Args...) {
         this.pool.tryDeleteExecute( cast(AbstractTask*) &this);
 
         while(true) {
-            if(done) {  // doen() implicitly checks for exceptions.
+            if(done) {  // done() implicitly checks for exceptions.
                 static if(is(ReturnType == void)) {
                     return;
                 } else {
@@ -546,7 +589,7 @@ struct Task(alias fun, Args...) {
             AbstractTask* job;
             try {
                 // Locking explicitly and calling popNoSync() because
-                // pop() waits on a condition variable if there are no jobs
+                // pop() waits on a condition variable if there are no Tasks
                 // in the queue.
                 job = pool.popNoSync();
             } finally {
@@ -581,7 +624,7 @@ struct Task(alias fun, Args...) {
     /**
     Returns true if the $(D Task) is finished executing.
 
-    Throws:  Will rethrow any exception thrown during the execution of the
+    Throws:  Rethrows any exception thrown during the execution of the
              $(D Task).
     */
     @property bool done() @trusted {
@@ -590,7 +633,7 @@ struct Task(alias fun, Args...) {
     }
 
     /**
-    Creates a new thread for executing this $(D Task), execute it in the
+    Create a new thread for executing this $(D Task), execute it in the
     newly created thread, then terminate the thread.  This can be used for
     future/promise parallelism.  An explicit priority may optionally be given
     to the $(D Task).  If one is provided, its value is forwarded to
@@ -694,7 +737,7 @@ ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
 }
 
 /**
-Create a task on the GC heap that calls a function pointer, delegate, or
+Create a $(D Task) on the GC heap that calls a function pointer, delegate, or
 functor.
 
 Examples:
@@ -730,19 +773,24 @@ if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
 
 /**
 Safe version of Task, usable from $(D @safe) code.  Usage mechanics are
-identical to the non-@safe case, but safety introduces the following
-_restrictions:
+identical to the non-@safe case, but safety introduces the some restrictions.
 
-1.  $(D F) must not have any unshared aliasing.  Basically, this means that it
-    may not be an unshared delegate.  This also precludes accepting template
-    alias paramters.
+1.  $(D fun) must be @safe or @trusted.
 
-2.  $(D Args) must not have unshared aliasing.
+2.  $(D F) must not have any unshared aliasing as defined by
+    $(XREF traits, hasUnsharedAliasing).  This means that it
+    may not be an unshared delegate or a non-shared class or struct
+    with overloaded $(D opCall).  This also precludes accepting template
+    alias parameters.
 
-3.  The return type must not have unshared aliasing unless $(D fun) is weakly
-    pure.
+3.  $(D Args) must not have unshared aliasing.
 
 4.  $(D fun) must return by value, not by reference.
+
+5.  The return type must not have unshared aliasing unless either $(D fun) is
+    $(D pure) or the $(D Task) is executed via $(D executeInNewThread) instead
+    of using a $(D TaskPool).
+
 */
 @trusted Task!(run, TypeTuple!(F, Args))*
 task(F, Args...)(F fun, Args args)
@@ -770,7 +818,7 @@ Usage is otherwise identical to $(D task).
 
 Notes:  $(D Task) objects created using $(D scopedTask) will automatically
 call $(D Task.yieldForce) in their destructor if necessary to ensure that
-the $(D Task) is complete before the stack frame on which it resides is
+the $(D Task) is complete before the stack frame on which they reside is
 destroyed.
 */
 Task!(fun, Args) scopedTask(alias fun, Args...)(Args args) {
@@ -813,10 +861,14 @@ of the task queue when one is available and sleeps when the task queue is empty.
 
 This class should usually be used via the default global instantiation,
 available via the global $(D taskPool) property, which is described below.
-Occasionally it may be useful to explicitly instantiate a $(D TaskPool) object,
-for example when the threads in the global task pool are blocked waiting for
-some code to execute, and you want to parallelize the code that these threads
-are waiting on.
+Occasionally it may be useful to explicitly instantiate a $(D TaskPool) object:
+
+1.  When you want $(D TaskPool) instances with multiple priorities, for example
+    a low priority pool and a high priority pool.
+
+2.  When the threads in the global task pool are blocked waiting for
+    some code to execute, and you want to parallelize the code that these
+    threads are waiting on.
  */
 final class TaskPool {
 private:
@@ -833,7 +885,7 @@ private:
 
     AbstractTask* head;
     AbstractTask* tail;
-    PoolState status = PoolState.running;  // All operations on this are done atomically.
+    PoolState status = PoolState.running;
     Condition workerCondition;
     Condition waiterCondition;
     Mutex mutex;
@@ -882,7 +934,8 @@ private:
 
     // This function is used for dummy pools created by Task.executeInNewThread().
     void doSingleTask() {
-        // No synchronization.  Pool is guaranteed to only have one thread.
+        // No synchronization.  Pool is guaranteed to only have one thread,
+        // and the queue is submitted to before this thread is created.
         assert(head);
         auto t = head;
         t.next = t.prev = head = null;
@@ -955,7 +1008,7 @@ private:
         return true;
     }
 
-    // Pop a task off the queue.  Should only be called by worker threads.
+    // Pop a task off the queue.
     AbstractTask* pop() {
         lock();
         auto ret = popNoSync();
@@ -1022,27 +1075,25 @@ private:
         notify();
     }
 
-    // Same as trySteal, but also deletes the task from the queue so the
-    // Task object can be recycled.
-    bool tryDeleteExecute(AbstractTask* toSteal) {
+    bool tryDeleteExecute(AbstractTask* toExecute) {
         if(isSingleTask) return false;
 
-        if( !deleteItem(toSteal) ) {
+        if( !deleteItem(toExecute) ) {
             return false;
         }
 
-        toSteal.job();
+        toExecute.job();
 
         /* shouldSetDone should always be true except if the task re-submits
          * itself to the pool and needs to bypass this.*/
-        if(toSteal.shouldSetDone == 1) {
-            atomicSetUbyte(toSteal.taskStatus, TaskState.done);
+        if(toExecute.shouldSetDone) {
+            atomicSetUbyte(toExecute.taskStatus, TaskState.done);
         }
 
         return true;
     }
 
-    size_t defaultBlockSize(size_t rangeLen) const pure nothrow {
+    size_t defaultBlockSize(size_t rangeLen) const pure nothrow @safe {
         if(this.size == 0) {
             return rangeLen;
         }
@@ -1088,13 +1139,8 @@ private:
     not in this pool will receive an index of 0.  The worker threads in
     this pool receive indices of 1 through this.size().
 
-    The worker index is useful mainly for maintaining worker-local storage.
-
-    BUGS:  Subject to integer overflow errors if more than size_t.max worker
-           threads are ever created during the course of a program's execution.
-           This will likely never be fixed because it's an extreme corner case
-           on 32-bit and it's completely implausible on 64-bit.
-     */
+    The worker index is used for maintaining worker-local storage.
+    */
     size_t workerIndex() {
         immutable rawInd = threadIndex;
         return (rawInd >= instanceStartIndex &&
@@ -1186,7 +1232,6 @@ public:
 
     // Iterate over logs using work units of size 100.
     foreach(i, ref elem; taskPool.parallel(logs, 100)) {
-
         elem = log(i + 1.0);
     }
 
@@ -1205,24 +1250,22 @@ public:
 
     This implementation of parallel foreach lazily submits $(D Task) objects
     to the task queue, rather than eagerly submitting all of them upfront.
-    This allows the amount of memory used to be sublinear in the length of
-    $(D range) for fixed work unit size.
+    This means memory usage is constant in the length of $(D range) for fixed
+    work unit size.
 
-    Breaking from a parallel foreach loop breaks from the current work unit,
-    but still executes other work units.  A goto from inside the parallel
-    foreach loop to a label outside the loop will result in undefined
-    behavior.
+    Breaking from a parallel foreach loop via a break, labeled break,
+    labeled continue, return or goto statement throws a
+    $(D ParallelForeachError).
 
     In the case of non-random access ranges, parallel foreach is still usable
     but buffers lazily to an array of size $(D workUnitSize) before executing
     the parallel portion of the loop.  The exception is that, if a parallel
     foreach is executed over a range returned by $(D asyncBuf) or $(D lazyMap),
-    the copying is elided and the buffers are simply swapped.  However, note
-    that in this case the $(D workUnitSize) parameter of this function will be
-    ignored and the work unit size will be set to the buffer size of the object
-    returned by $(D asyncBuf) or $(D lazyMap).
+    the copying is elided and the buffers are simply swapped.  In this case
+    $(D workUnitSize) is ignored and the work unit size will be set to the
+    buffer size of the object returned by $(D asyncBuf) or $(D lazyMap).
 
-    Exception Handling:
+    $(B Exception Handling):
 
     When at least one exception is thrown from inside a parallel foreach loop,
     the submission of additional $(D Task) objects is terminated as soon as
@@ -1242,7 +1285,7 @@ public:
     /// Ditto
     ParallelForeach!R parallel(R)(R range) {
         static if(hasLength!R) {
-            // Default block size is such that we would use 2x as many
+            // Default work unit size is such that we would use 4x as many
             // slots as are in this thread pool.
             size_t blockSize = defaultBlockSize(range.length);
             return parallel(range, blockSize);
@@ -1255,8 +1298,8 @@ public:
 
     /**
     Eager parallel map.  $(D functions) are the functions to be evaluated,
-    passed as template alias parameters in a style similar to std.algorithm.
-    The first argument must be a random access range.
+    passed as template alias parameters in a style similar to
+    $(XREF algorithm, map).  The first argument must be a random access range.
 
     ---
     auto numbers = iota(100_000_000);
@@ -1280,7 +1323,7 @@ public:
     auto squareRoots = taskPool.map!sqrt(numbers, 100);
     ---
 
-    An optional buffer for returining the results may be provided as the last
+    An optional buffer for returning the results may be provided as the last
     argument.  If one is not provided, one will be automatically allocated.
     If one is provided, it must be the same length as the range.
 
@@ -1294,7 +1337,7 @@ public:
     taskPool.map!(sqrt, log)(numbers, 100, results);
     ---
 
-    Exception Handling:
+    $(B Exception Handling):
 
     When at least one exception is thrown from inside the map function,
     the submission of additional $(D Task) objects is terminated as soon as
@@ -1302,7 +1345,6 @@ public:
     enqueued work units are allowed to complete.  Then, all exceptions that
     were thrown by any work unit are chained using $(D Throwable.next) and
     rethrown.  The order of the exception chaining is non-deterministic.
-
      */
     template map(functions...) {
         ///
@@ -1437,19 +1479,19 @@ public:
 
     Parameters:
 
-    range:  The range to be mapped.  This must be an input range, though it
+    $(D range):  The range to be mapped.  This must be an input range, though it
     should preferably be a random access range to avoid needing to buffer
-    to temporary array before mapping.  If the $(D range) is not random access
+    to temporary array before mapping.  If $(D range) is not random access
     it will be lazily buffered to an array of size $(D bufSize) before the map
     function is evaluated.  (For an exception to this rule, see Notes.)
 
-    bufSize:  The size of the buffer to store the evaluated elements.
+    $(D bufSize):  The size of the buffer to store the evaluated elements.
 
-    workUnitSize:  The number of elements to evaluate in a single $(D Task).
-      Must be less than or equal to $(D bufSize), and in practice should be a
-      fraction of $(D bufSize) such that all worker threads can be used.  If
-      the default of size_t.max is used, workUnitSize will be set to the
-      pool-wide default.
+    $(D workUnitSize):  The number of elements to evaluate in a single
+    $(D Task).  Must be less than or equal to $(D bufSize), and in practice
+    should be a fraction of $(D bufSize) such that all worker threads can be
+    used.  If the default of size_t.max is used, workUnitSize will be set to
+    the pool-wide default.
 
     Returns:  An input range representing the results of the map.  This range
               has a length iff $(D range) has a length.
@@ -1481,7 +1523,9 @@ public:
     }
     ---
 
-    Exception handling:  Any exceptions thrown while iterating over $(D range)
+    $(B Exception handling):
+
+    Any exceptions thrown while iterating over $(D range)
     or computing the map function are re-thrown on a call to $(D popFront).
     In the case of exceptions thrown while computing the map function,
     the exceptions are chained as in $(D TaskPool.map).
@@ -1713,8 +1757,10 @@ public:
     }
     ---
 
-    Exception handling:  Any exceptions thrown while iterating over $(D range)
-    are re-thrown on a call to $(D popFront).
+    $(B Exception handling):
+
+    Any exceptions thrown while iterating over $(D range) are re-thrown on a
+    call to $(D popFront).
     */
     auto asyncBuf(R)(R range, size_t bufSize = 100) {
         static final class AsyncBuf {
@@ -1735,7 +1781,7 @@ public:
             static if(hasLength!R) {
                 size_t _length;
 
-                /// Available if hasLength!(R).
+                // Available if hasLength!(R).
                 public @property size_t length() const pure nothrow @safe {
                     return _length;
                 }
@@ -1829,43 +1875,72 @@ public:
     }
 
     /**
-    Parallel reduce.  The first argument must be the range to be reduced.
-    It must offer random access and have a length.  An explicit work unit size
-    (as described in the documentation for parallel foreach) may optionally be
-    provided as the second argument.  If none is provided, the default work
-    unit size is used.
+    Parallel reduce.  Except as otherwise noted, usage is similar to
+    $(XREF algorithm, reduce).  This function works by splitting the range to
+    be reduced into work units, which are slices to be reduced in parallel.
+    Once the results from all work units are computed, a final serial
+    reduction is performed on these results to compute the final answer.
+    Therefore, care must be taken to choose the seed value appropriately.
 
-    Note:  Because this operation is being carried out in parallel,
+    Furthermore, because the reduction is being performed in parallel,
     $(D fun) must be associative.  For notational simplicity, let # be an
     infix operator representing $(D fun).  Then, (a # b) # c must equal
-    a # (b # c).  Also note that floating point addition is not associative
+    a # (b # c).  Floating point addition is not associative
     even though addition in exact arithmetic is.  Therefore, summing floating
     point numbers using this function may give different results than summing
     serially.  However, for many practical purposes floating point addition
-    can be treated as associative.  This is done in some of the examples below.
+    can be treated as associative.
 
-    Examples:
+    An optional explicit seed may be provided as the first argument.  If
+    provided, it is used as the seed for all work units (i.e. slices of the
+    range that are reduced in parallel) and for the final reduction of
+    results from all work units.  Therefore, if it is not the identity value
+    for the operation being performed, results may differ from those generated
+    by $(D std.algorithm.reduce) or depending on how many work units are used.
+    The next argument must be the range to be reduced.
     ---
-    // Find the sum of squares of a range in parallel.
+    // Find the sum of squares of a range in parallel, using an explicit seed.
     //
     // Timings on an Athlon 64 X2 dual core machine:
     //
-    // Parallel reduce:                     0.329 s
-    // Using std.algorithm.reduce instead:  0.790 s
-    auto nums = iota(100_000_000);
-    auto mySum = taskPool.reduce!"a + b * b"(0.0, nums);
+    // Parallel reduce:                     100 milliseconds
+    // Using std.algorithm.reduce instead:  169 milliseconds
+    auto nums = iota(10_000_000.0f);
+    auto sumSquares = taskPool.reduce!"a + b * b"(0.0, nums);
+    ---
 
-    // Find both the min and max of nums.  This example illustrates the
-    // mechanics of using reduce() with multiple functions.  However, this
-    // example performs slower in parallel than in serial, probably because
-    // of the overhead of accessing iota() with random access instead of
-    // forward access.
+    If no explicit seed is provided, the first element of each work unit
+    is used as a seed.  For the final reduction, the result from the first
+    work unit is used as the seed.
+    ---
+    // Find the sum of a range in parallel, using the first element of each
+    // work unit as the seed.
+    auto sums = taskPool.reduce!"a + b"(nums);
+    ---
+
+    An explicit work unit size may optionally be specified as the last argument.
+    Specifying too small a work unit size will effectively serialize the
+    reduction, as the final reduction of the results of each work unit will
+    dominate computation time.  If the $(D TaskPool.size) for this instance
+    is zero, this parameter is ignored and one work unit is used.
+    ---
+    // Use a work unit size of 100.
+    auto sums2 = taskPool.reduce!"a + b"(nums, 100);
+
+    // Work unit size of 100 and explicit seed.
+    auto sums3 = taskPool.reduce!"a + b"(0.0, nums, 100);
+    ---
+
+    Parallel reduce works with multiple functions, like
+    $(D std.algorithm.reduce).
+    ---
+    // Find both the min and max of nums.
     auto minMax = taskPool.reduce!(min, max)(nums);
     assert(minMax.field[0] == reduce!min(nums));
     assert(minMax.field[1] == reduce!max(nums));
     ---
 
-    Exception handling:
+    $(B Exception handling):
 
     After all work units are finished executing, if any exceptions were thrown
     they are chained together via $(D Throwable.next) and rethrown.  The order
@@ -1887,26 +1962,27 @@ public:
                 alias Args Args2;
             }
 
-            static auto makeStartValue(Type)(Type e) {
+            auto makeStartValue(Type)(Type e) {
                 static if(functions.length == 1) {
                     return e;
                 } else {
                     typeof(adjoin!(staticMap!(binaryFun, functions))(e, e))
-                        startVal = void;
-                    foreach (i, T; startVal.Types) {
-                        auto p = (cast(void*) &startVal.field[i])
-                            [0 .. startVal.field[i].sizeof];
+                        seed = void;
+                    foreach (i, T; seed.Types) {
+                        auto p = (cast(void*) &seed.field[i])
+                            [0 .. seed.field[i].sizeof];
                         emplace!T(p, e);
                     }
 
-                    return startVal;
+                    return seed;
                 }
             }
 
             static if(args2.length == 2) {
                 static assert(isInputRange!(Args2[1]));
                 alias args2[1] range;
-                alias args2[0] startVal;
+                alias args2[0] seed;
+                enum explicitSeed = true;
 
                 static if(!is(typeof(blockSize))) {
                     size_t blockSize = defaultBlockSize(range.length);
@@ -1923,15 +1999,16 @@ public:
                 enforce(!range.empty,
                     "Cannot reduce an empty range with first element as start value.");
 
-                auto startVal = makeStartValue(range.front);
+                auto seed = makeStartValue(range.front);
+                enum explicitSeed = false;
                 range.popFront();
             }
 
-            alias typeof(startVal) E;
+            alias typeof(seed) E;
             alias typeof(range) R;
 
             if(this.size == 0) {
-                return std.algorithm.reduce!(fun)(startVal, range);
+                return std.algorithm.reduce!(fun)(seed, range);
             }
 
             // Unlike the rest of the functions here, I can't use the Task object
@@ -1950,8 +2027,8 @@ public:
             assert(nWorkUnits * blockSize >= len);
 
             static E reduceOnRange
-            (E startVal, R range, size_t lowerBound, size_t upperBound) {
-                E result = startVal;
+            (E seed, R range, size_t lowerBound, size_t upperBound) {
+                E result = seed;
                 foreach(i; lowerBound..upperBound) {
                     result = fun(result, range[i]);
                 }
@@ -1973,10 +2050,16 @@ public:
 
             size_t curPos = 0;
             void useTask(ref RTask task) {
-                task.args[2] = curPos + 1; // lower bound.
                 task.args[3] = min(len, curPos + blockSize);  // upper bound.
                 task.args[1] = range;  // range
-                task.args[0] = makeStartValue(range[curPos]);  // Start val.
+
+                static if(explicitSeed) {
+                    task.args[2] = curPos; // lower bound.
+                    task.args[0] = seed;
+                } else {
+                    task.args[2] = curPos + 1; // lower bound.
+                    task.args[0] = makeStartValue(range[curPos]);
+                }
 
                 curPos += blockSize;
                 put(task);
@@ -1993,7 +2076,7 @@ public:
 
             // Now that we've tried to execute every task, they're all either
             // done or in progress.  Force all of them.
-            E result = startVal;
+            E result = seed;
 
             Throwable firstException, lastException;
 
@@ -2018,17 +2101,16 @@ public:
     Struct for creating worker-local storage.  Worker-local storage is
     thread-local storage that exists only for worker threads in a given
     $(D TaskPool) plus a single thread outside the pool, is allocated on the
-    heap in a way that avoids false sharing, and doesn't necessarily have global
-    scope within any thread.  It can be accessed from any worker thread in the
-    pool that created  it, and one thread outside this pool.  All threads
-    outside the pool that created a given instance of worker-local storage
-    share a single slot.
+    garbage collected heap in a way that avoids false sharing, and doesn't
+    necessarily have global scope within any thread.  It can be accessed from
+    any worker thread in the pool that created  it, and one thread outside this
+    $(D TaskPool).  All threads outside the pool that created a given instance
+    of worker-local storage share a single slot.
 
     Since the underlying data for this struct is heap-allocated, this struct
-    has reference semantics when passed around.
+    has reference semantics when passed between functions.
 
-    At a more concrete level, the main uses case for
-    $(D WorkerLocalStorageStorage) are:
+    The main uses case for $(D WorkerLocalStorageStorage) are:
 
     1.  Performing parallel reductions with an imperative, as opposed to
     functional, programming style.  In this case, it's useful to treat
@@ -2039,8 +2121,8 @@ public:
 
     Examples:
     ---
-    // Calculate pi as in our example for parallel reduce, but use an
-    // imperative instead of a functional style.
+    // Calculate pi as in our synopsis example, but use an imperative instead
+    // of a functional style.
     immutable n = 1_000_000_000;
     immutable delta = 1.0L / n;
 
@@ -2130,7 +2212,7 @@ public:
         /**
         Get the current thread's instance.  Returns by reference.
         Note that calling $(D get) from any thread
-        outside the pool that created this instance will return the
+        outside the $(D TaskPool) that created this instance will return the
         same reference, so an instance of worker-local storage should only be
         accessed from one thread outside the pool that created it.  If this
         rule is violated, undefined behavior will result.
@@ -2283,7 +2365,7 @@ public:
     there can't be more in queue, or if you speculatively executed some tasks
     and no longer need the results.
 
-    Note:  Does not affect jobs that are already executing, only those
+    Note:  Does not affect tasks that are already executing, only those
     in queue.
      */
     void stop() @trusted {
@@ -2359,20 +2441,43 @@ public:
     taskPool.put(t);
     ---
 
-    Note:  While this function takes the address of variables that may
-    potentially be on the stack, it is safe and marked as @trusted.  $(D Task)
-    objects include a destructor that waits for the task to complete before
-    destroying the stack frame that they are allocated on.  Therefore, it is
-    impossible for the stack frame to be destroyed before the task is complete
-    and out of the queue.
+    Notes:
+
+    @trusted overloads of this function are called for $(D Task)s that either
+    return a type for which $(XREF traits, hasUnsharedAliasing) is false or the
+    function to be executed is $(D pure).  $(D Task) objects that meet all
+    other requirements specified in the $(D @trusted) overloads of $(D task)
+    and $(D scopedTask) may be executed from $(D @safe) code via
+    $(D Task.executeInNewThread) but not via $(D TaskPool).
+
+    While this function takes the address of variables that may
+    potentially be on the stack, some overloads are marked as @trusted.
+    $(D Task) includes a destructor that waits for the task to complete
+    before destroying the stack frame it is allocated on.  Therefore,
+    it is impossible for the stack frame to be destroyed before the task is
+    complete and no longer referenced by a $(D TaskPool).
     */
-    void put(alias fun, Args...)(ref Task!(fun, Args) task) @trusted {
+    void put(alias fun, Args...)(ref Task!(fun, Args) task)
+    if(!isSafeReturn!(typeof(task))) {
         task.pool = this;
         abstractPut( cast(AbstractTask*) &task);
     }
 
     /// Ditto
-    void put(alias fun, Args...)(Task!(fun, Args)* task) @trusted {
+    void put(alias fun, Args...)(Task!(fun, Args)* task)
+    if(!isSafeReturn!(typeof(*task))) {
+        enforce(task !is null, "Cannot put a null Task on a TaskPool queue.");
+        put(*task);
+    }
+
+    @trusted void put(alias fun, Args...)(ref Task!(fun, Args) task)
+    if(isSafeReturn!(typeof(task))) {
+        task.pool = this;
+        abstractPut( cast(AbstractTask*) &task);
+    }
+
+    @trusted void put(alias fun, Args...)(Task!(fun, Args)* task)
+    if(isSafeReturn!(typeof(*task))) {
         enforce(task !is null, "Cannot put a null Task on a TaskPool queue.");
         put(*task);
     }
@@ -2508,6 +2613,16 @@ ParallelForeach!R parallel(R)(R range, size_t workUnitSize) {
     return taskPool.parallel(range, workUnitSize);
 }
 
+// Thrown when a parallel foreach loop is broken from.
+class ParallelForeachError : Error {
+    this() {
+        super("Cannot break from a parallel foreach loop using break, return, "
+              ~ "labeled break/continue or goto statements.");
+    }
+}
+
+private void foreachErr() { throw new ParallelForeachError(); }
+
 private struct ParallelForeachTask(R, Delegate)
 if(isRandomAccessRange!R && hasLength!R) {
     enum withIndex = ParameterTypeTuple!(Delegate).length == 2;
@@ -2518,16 +2633,16 @@ if(isRandomAccessRange!R && hasLength!R) {
 
             static if(hasLvalueElements!R) {
                 static if(withIndex) {
-                    if(myCastedTask.runMe(i, myCastedTask.myRange[i])) break;
+                    if(myCastedTask.runMe(i, myCastedTask.myRange[i])) foreachErr();
                 } else {
-                    if(myCastedTask.runMe( myCastedTask.myRange[i])) break;
+                    if(myCastedTask.runMe( myCastedTask.myRange[i])) foreachErr();
                 }
             } else {
                 auto valToPass = myCastedTask.myRange[i];
                 static if(withIndex) {
-                    if(myCastedTask.runMe(i, valToPass)) break;
+                    if(myCastedTask.runMe(i, valToPass)) foreachErr();
                 } else {
-                    if(myCastedTask.runMe(valToPass)) break;
+                    if(myCastedTask.runMe(valToPass)) foreachErr();
                 }
             }
         }
@@ -2586,9 +2701,9 @@ if(!isRandomAccessRange!R || !hasLength!R) {
         foreach(i, element; myCastedTask.elements) {
             static if(withIndex) {
                 size_t lValueIndex = i + myCastedTask.startIndex;
-                if(myCastedTask.runMe(lValueIndex, getElement(element))) break;
+                if(myCastedTask.runMe(lValueIndex, getElement(element))) foreachErr();
             } else {
-                if(myCastedTask.runMe(getElement(element))) break;
+                if(myCastedTask.runMe(getElement(element))) foreachErr();
             }
         }
 
@@ -2620,8 +2735,8 @@ if(!isRandomAccessRange!R || !hasLength!R) {
         pool.lock();
         scope(exit) pool.unlock();
 
-        // No work stealing here b/c the function that waits on this task
-        // wants to recycle it as soon as it finishes.
+        // Don't try to execute in this thread b/c the function that waits on
+        // this task wants to recycle it as soon as it finishes.
 
         while(!done()) {
             pool.waitUntilCompletion();
@@ -3072,10 +3187,11 @@ unittest {
 
 
     assert(poolInstance.reduce!"a + b"([1,2,3,4]) == 10);
-    assert(poolInstance.reduce!"a + b"(5.0, [1,2,3,4]) == 15);
+    assert(poolInstance.reduce!"a + b"(0.0, [1,2,3,4]) == 10);
+    assert(poolInstance.reduce!"a + b"(0.0, [1,2,3,4], 1) == 10);
     assert(poolInstance.reduce!(min, max)([1,2,3,4]) == tuple(1, 4));
-    assert(poolInstance.reduce!("a + b", "a * b")(tuple(5, 2), [1,2,3,4]) ==
-        tuple(15, 48));
+    assert(poolInstance.reduce!("a + b", "a * b")(tuple(0, 1), [1,2,3,4]) ==
+        tuple(10, 24));
 
     // Test worker-local storage.
     auto wl = poolInstance.workerLocalStorage(0);
@@ -3210,7 +3326,8 @@ version(parallelismStressTest) {
             stderr.writeln("Done squares.");
 
             // Sum up the array in parallel with the current thread.
-            auto sumFuture = poolInstance.task!( reduce!"a + b" )(numbers);
+            auto sumFuture = task!( reduce!"a + b" )(numbers);
+            poolInstance.put(sumFuture);
 
             // Go off and do other stuff while that future executes:
             // Find the sum of squares of numbers.
@@ -3348,7 +3465,8 @@ version(parallelismStressTest) {
             stderr.writeln("Done sum of square roots.");
 
             // Test whether tasks work with function pointers.
-            auto nanTask = poolInstance.task(&isNaN, 1.0L);
+            auto nanTask = task(&isNaN, 1.0L);
+            poolInstance.put(nanTask);
             assert(nanTask.spinForce == false);
 
             if(poolInstance.size > 0) {
