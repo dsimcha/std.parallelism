@@ -10,7 +10,7 @@ $(D std.concurrency).
 
 $(D std._parallelism) is based on the concept of a $(D Task).  A $(D Task) is an
 object that represents the fundamental unit of work in this library and may be
-executed in parallel with any other $(D Task).  Using the $(D Task) object
+executed in parallel with any other $(D Task).  Using $(D Task)
 directly allows programming with a future/promise paradigm.  All other
 supported _parallelism paradigms (parallel foreach, map, reduce, pipelining)
 represent an additional level of abstraction over $(D Task) in that they
@@ -46,7 +46,7 @@ void main() {
     // Parallel reduce can be combined with a lazy, random access,
     // non-parallel map such as std.algorithm.map to interesting
     // effect.  The following example (thanks to Russel Winder)
-    // calculates pi by quadrature using std.parallelism.map and
+    // calculates pi by quadrature using std.algorithm.map and
     // TaskPool.reduce. getTerm() is naturally evaluated in parallel
     // as needed by TaskPool.reduce.
     //
@@ -447,27 +447,32 @@ struct Task(alias fun, Args...) {
     */
     static if(__traits(isSame, fun, run)) {
         alias _args[1..$] args;
+    } else {
+        alias _args args;
+    }
 
+
+    // The purpose of this code is to decide whether functions whose
+    // return values have unshared aliasing can be executed via
+    // TaskPool from @safe code.  See isSafeReturn.
+    static if(__traits(isSame, fun, run)) {
         static if(isFunctionPointer!(_args[0])) {
-            // The purpose of this value is to decide whether functions whose
-            // return values have unshared aliasing can be executed via
-            // TaskPool from @safe code.  See isSafeReturn.
-            enum bool isPure =
+            private enum bool isPure =
                 functionAttributes!(Args[0]) & FunctionAttribute.PURE;
         } else {
             // BUG:  Should check this for delegates too, but std.traits
-            //       apparently doesn't allow this and isPure is irrelevant
-            //       for delegates anyhow.
-            enum bool isPure = false;
+            //       apparently doesn't allow this.  isPure is irrelevant
+            //       for delegates, at least for now since shared delegates
+            //       don't work.
+            private enum bool isPure = false;
         }
 
     } else {
-        alias _args args;
-
         // We already know that we can't execute aliases in @safe code, so
         // just put a dummy value here.
-        enum bool isPure = false;
+        private enum bool isPure = false;
     }
+
 
     /// The return type of the function called by this $(D Task).
     alias typeof(fun(_args)) ReturnType;
@@ -660,6 +665,15 @@ struct Task(alias fun, Args...) {
     //@disable this(this) { assert(0);}
 }
 
+
+// Calls $(D fpOrDelegate) with $(D args).  This is an
+// adapter that makes $(D Task) work with delegates, function pointers and
+// functors instead of just aliases.
+ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
+    return fpOrDelegate(args);
+}
+
+
 /**
 Creates a $(D Task) on the GC heap that calls an alias.
 
@@ -719,21 +733,10 @@ void parallelSort(T)(T[] data) {
 }
 ---
 */
-Task!(fun, Args)* task(alias fun, Args...)(Args args) {
+auto task(alias fun, Args...)(Args args) {
     alias Task!(fun, Args) RetType;
     auto stack = RetType(args);
     return moveToHeap(stack);
-}
-
-/**
-Calls $(D fpOrDelegate) with $(D args).  This is an
-adapter that makes $(D Task) work with delegates, function pointers and
-functors instead of just aliases.  It is included in the documentation
-to clarify how this case is handled, but is not meant to be used directly
-by client code.
- */
-ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
-    return fpOrDelegate(args);
 }
 
 /**
@@ -764,8 +767,7 @@ Notes: This function takes a non-scope delegate, meaning it can be
        on the stack that have scoped destruction, see $(D scopedTask), which
        takes a scope delegate.
  */
-Task!(run, TypeTuple!(F, Args))*
-task(F, Args...)(F delegateOrFp, Args args)
+auto task(F, Args...)(F delegateOrFp, Args args)
 if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
     auto stack = Task!(run, TypeTuple!(F, Args))(delegateOrFp, args);
     return moveToHeap(stack);
@@ -792,8 +794,7 @@ identical to the non-@safe case, but safety introduces the some restrictions.
     of using a $(D TaskPool).
 
 */
-@trusted Task!(run, TypeTuple!(F, Args))*
-task(F, Args...)(F fun, Args args)
+@trusted auto task(F, Args...)(F fun, Args args)
 if(is(typeof(fun(args))) && isSafeTask!F) {
     auto stack = Task!(run, TypeTuple!(F, Args))(fun, args);
     return moveToHeap(stack);
@@ -821,24 +822,22 @@ call $(D Task.yieldForce) in their destructor if necessary to ensure that
 the $(D Task) is complete before the stack frame on which they reside is
 destroyed.
 */
-Task!(fun, Args) scopedTask(alias fun, Args...)(Args args) {
-    auto ret = typeof(return)(args);
+auto scopedTask(alias fun, Args...)(Args args) {
+    auto ret = Task!(fun, Args)(args);
     ret.isScoped = true;
     return ret;
 }
 
 /// Ditto
-Task!(run, TypeTuple!(F, Args))
-scopedTask(F, Args...)(scope F delegateOrFp, Args args)
+auto scopedTask(F, Args...)(scope F delegateOrFp, Args args)
 if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
-    auto ret = typeof(return)(delegateOrFp, args);
+    auto ret = Task!(run, TypeTuple!(F, Args))(delegateOrFp, args);
     ret.isScoped = true;
     return ret;
 }
 
 /// Ditto
-@trusted Task!(run, TypeTuple!(F, Args))
-scopedTask(F, Args...)(F fun, Args args)
+@trusted auto scopedTask(F, Args...)(F fun, Args args)
 if(is(typeof(fun(args))) && isSafeTask!F) {
     auto ret = typeof(return)(fun, args);
     ret.isScoped = true;
@@ -1260,10 +1259,10 @@ public:
     In the case of non-random access ranges, parallel foreach is still usable
     but buffers lazily to an array of size $(D workUnitSize) before executing
     the parallel portion of the loop.  The exception is that, if a parallel
-    foreach is executed over a range returned by $(D asyncBuf) or $(D lazyMap),
+    foreach is executed over a range returned by $(D asyncBuf) or $(D map),
     the copying is elided and the buffers are simply swapped.  In this case
     $(D workUnitSize) is ignored and the work unit size will be set to the
-    buffer size of the object returned by $(D asyncBuf) or $(D lazyMap).
+    buffer size of the object returned by $(D asyncBuf) or $(D map).
 
     $(B Exception Handling):
 
@@ -1297,7 +1296,10 @@ public:
     }
 
     /**
-    Eager parallel map.  $(D functions) are the functions to be evaluated,
+    Eager parallel map.  The eagerness of this function means it has less
+    overhead than the lazily evaluated $(D TaskPool.map) and should be
+    preferred where the memory requirements of eagerness are acceptable.
+    $(D functions) are the functions to be evaluated,
     passed as template alias parameters in a style similar to
     $(XREF algorithm, map).  The first argument must be a random access range.
 
@@ -1308,19 +1310,19 @@ public:
     //
     // Timings on an Athlon 64 X2 dual core machine:
     //
-    // Parallel map:                         0.802 s
+    // Parallel amap:                         0.802 s
     // Equivalent serial implementation:     1.768 s
-    auto squareRoots = taskPool.map!sqrt(numbers);
+    auto squareRoots = taskPool.amap!sqrt(numbers);
     ---
 
     Immediately after the range argument, an optional work unit size argument
-    may be provided.  Work units as used by $(D map) are identical to those
+    may be provided.  Work units as used by $(D amap) are identical to those
     defined for parallel foreach.  If no work unit size is provided, the
     default work unit size is used.
 
     ---
     // Same thing, but make work units explicitly of size 100.
-    auto squareRoots = taskPool.map!sqrt(numbers, 100);
+    auto squareRoots = taskPool.amap!sqrt(numbers, 100);
     ---
 
     An optional buffer for returning the results may be provided as the last
@@ -1328,13 +1330,15 @@ public:
     If one is provided, it must be the same length as the range.
 
     ---
-    // Same thing, but explicitly pre-allocate a buffer.
+    // Same thing, but explicitly pre-allocate a buffer.  The element type of
+    // the buffer may be either the exact type returned by functions or an
+    // implicit conversion target.
     auto squareRoots = new float[numbers.length];
-    taskPool.map!sqrt(numbers, squareRoots);
+    taskPool.amap!sqrt(numbers, squareRoots);
 
     // Multiple functions, explicit buffer, and explicit work unit size.
     auto results = new Tuple!(float, real)[numbers.length];
-    taskPool.map!(sqrt, log)(numbers, 100, results);
+    taskPool.amap!(sqrt, log)(numbers, 100, results);
     ---
 
     $(B Exception Handling):
@@ -1346,9 +1350,9 @@ public:
     were thrown by any work unit are chained using $(D Throwable.next) and
     rethrown.  The order of the exception chaining is non-deterministic.
      */
-    template map(functions...) {
+    template amap(functions...) {
         ///
-        auto map(Args...)(Args args) {
+        auto amap(Args...)(Args args) {
             static if(functions.length == 1) {
                 alias unaryFun!(functions[0]) fun;
             } else {
@@ -1389,7 +1393,8 @@ public:
                 GC.BlkAttr gcFlags = (typeid(MT).flags & 1) ?
                                       cast(GC.BlkAttr) 0 :
                                       GC.BlkAttr.NO_SCAN;
-                auto myPtr = cast(MT*) GC.malloc(len * MT.sizeof, gcFlags);
+                auto myPtr = cast(typeof(buf[0])*) GC.malloc(len *
+                    typeof(buf[0]).sizeof, gcFlags);
                 buf = myPtr[0..len];
             }
             enforce(buf.length == len,
@@ -1476,6 +1481,8 @@ public:
     implementation allows for elements to be written to the buffer without
     the need for atomic operations or synchronization for each write, and
     enables the mapping function to be evaluated efficiently in parallel.
+    $(D map) has more overhead than the simpler procedure used by $(D amap)
+    but avoids the need to keep all results in memory simultaneously.
 
     Parameters:
 
@@ -1498,12 +1505,12 @@ public:
 
     Notes:
 
-    If a range returned by $(D lazyMap) or $(D asyncBuf) is used as an input to
-    $(D lazyMap), then as an optimization the copying from the output buffer
+    If a range returned by $(D map) or $(D asyncBuf) is used as an input to
+    $(D map), then as an optimization the copying from the output buffer
     of the first range to the input buffer of the second range is elided, even
-    though the ranges returned by $(D lazyMap) and $(D asyncBuf) are input
+    though the ranges returned by $(D map) and $(D asyncBuf) are input
     ranges.  However, this means that the $(D bufSize) parameter passed to the
-    current call to $(D lazyMap) will be ignored and the size of the buffer
+    current call to $(D map) will be ignored and the size of the buffer
     will be the buffer size of $(D range).
 
     Examples:
@@ -1514,8 +1521,8 @@ public:
 
     auto lineRange = File("numberList.txt").byLine();
     auto dupedLines = std.algorithm.map!"a.idup"(lineRange);
-    auto nums = taskPool.lazyMap!(to!double)(dupedLines);
-    auto logs = taskPool.lazyMap!log10(nums);
+    auto nums = taskPool.map!(to!double)(dupedLines);
+    auto logs = taskPool.map!log10(nums);
 
     double sum = 0;
     foreach(elem; logs) {
@@ -1523,18 +1530,18 @@ public:
     }
     ---
 
-    $(B Exception handling):
+    $(B Exception Handling):
 
     Any exceptions thrown while iterating over $(D range)
     or computing the map function are re-thrown on a call to $(D popFront).
     In the case of exceptions thrown while computing the map function,
-    the exceptions are chained as in $(D TaskPool.map).
+    the exceptions are chained as in $(D TaskPool.amap).
     */
-    template lazyMap(functions...) {
+    template map(functions...) {
 
         ///
         auto
-        lazyMap(R)(R range, size_t bufSize = 100, size_t workUnitSize = size_t.max)
+        map(R)(R range, size_t bufSize = 100, size_t workUnitSize = size_t.max)
         if(isInputRange!R) {
             enforce(workUnitSize == size_t.max || workUnitSize <= bufSize,
                 "Work unit size must be smaller than buffer size.");
@@ -1661,7 +1668,7 @@ public:
                     }
 
                     buf = buf[0..min(buf.length, toMap.length)];
-                    pool.map!(functions)(
+                    pool.amap!(functions)(
                             toMap,
                             workUnitSize,
                             buf
@@ -1734,17 +1741,18 @@ public:
 
     /**
     Given an input range that is expensive to iterate over, returns an
-    object that asynchronously buffers the contents of
+    input range that asynchronously buffers the contents of
     $(D range) into a buffer of $(D bufSize) elements in a worker thread,
     while making prevously buffered elements from a second buffer, also of size
     $(D bufSize), available via the range interface of the returned
-    object.  This is useful, for example, when performing expensive operations
+    object.  The returned range has a length iff $(D hasLength!(R)).
+    $(D asyncBuf) is useful, for example, when performing expensive operations
     on the elements of ranges that represent data on a disk or network.
 
     Examples:
     ---
     auto lines = File("foo.txt").byLine();
-    auto duped = map!"a.idup"(lines);  // Necessary b/c byLine() recycles buffer
+    auto duped = std.algorithm.map!"a.idup"(lines);
 
     // Fetch more lines in the background while we process the lines already
     // read into memory into a matrix of doubles.
@@ -1757,7 +1765,7 @@ public:
     }
     ---
 
-    $(B Exception handling):
+    $(B Exception Handling):
 
     Any exceptions thrown while iterating over $(D range) are re-thrown on a
     call to $(D popFront).
@@ -1915,7 +1923,7 @@ public:
     ---
     // Find the sum of a range in parallel, using the first element of each
     // work unit as the seed.
-    auto sums = taskPool.reduce!"a + b"(nums);
+    auto sum = taskPool.reduce!"a + b"(nums);
     ---
 
     An explicit work unit size may optionally be specified as the last argument.
@@ -1925,10 +1933,10 @@ public:
     is zero, this parameter is ignored and one work unit is used.
     ---
     // Use a work unit size of 100.
-    auto sums2 = taskPool.reduce!"a + b"(nums, 100);
+    auto sum2 = taskPool.reduce!"a + b"(nums, 100);
 
     // Work unit size of 100 and explicit seed.
-    auto sums3 = taskPool.reduce!"a + b"(0.0, nums, 100);
+    auto sum3 = taskPool.reduce!"a + b"(0.0, nums, 100);
     ---
 
     Parallel reduce works with multiple functions, like
@@ -1940,7 +1948,7 @@ public:
     assert(minMax.field[1] == reduce!max(nums));
     ---
 
-    $(B Exception handling):
+    $(B Exception Handling):
 
     After all work units are finished executing, if any exceptions were thrown
     they are chained together via $(D Throwable.next) and rethrown.  The order
@@ -2375,7 +2383,7 @@ public:
         notifyAll();
     }
 
-    /**
+    /*
     Waits for all jobs to finish, then terminates all worker threads.  Blocks
     until all worker threads have terminated.
 
@@ -2403,16 +2411,18 @@ public:
     auto result3 = task3.spinForce();
     ---
     */
-    void join() @trusted {
-        finish();
-        foreach(t; pool) {
-            t.join();
+    version(none) {
+        void join() @trusted {
+            finish();
+            foreach(t; pool) {
+                t.join();
+            }
         }
     }
 
     /**
-    Instructs worker threads to terminate when the queue becomes empty as
-    in $(D join) but does not block.
+    Instructs worker threads to terminate when the queue becomes empty.  Does
+    not block.
      */
     void finish() @trusted {
         lock();
@@ -2488,8 +2498,8 @@ public:
     non-daemon threads have terminated.  A non-daemon thread will prevent
     a program from terminating as long as it has not terminated.
 
-    If any $(D TaskPool) with non-daemon threads is active, either $(D stop),
-    $(D join) or $(D finish) must be called on it before the program
+    If any $(D TaskPool) with non-daemon threads is active, either $(D stop)
+    or $(D finish) must be called on it before the program
     can terminate.
 
     The worker treads in the default $(D TaskPool) instance returned by the
@@ -2542,7 +2552,7 @@ public:
 Returns a lazily initialized default instantiation of $(D TaskPool).
 This function can safely be called concurrently from multiple non-worker
 threads.  The worker threads in this pool are daemon threads, meaning that it
-is not necessary to explicitly call $(D taskPool.join), $(D taskPool.stop)
+is not necessary to explicitly call $(D taskPool.stop)
 or $(D taskPool.finish) before terminating the main thread.
 
 One instance of this pool is shared across the entire program.
@@ -2794,7 +2804,7 @@ if(isRandomAccessRange!R && hasLength!R) {
 }
 
 // This mixin causes rethrown exceptions to be caught and chained.  It's used
-// in parallel map and foreach.
+// in parallel amap and foreach.
 private enum parallelExceptionHandling = q{
     try {
         // Calling done() rethrows exceptions.
@@ -2812,7 +2822,7 @@ private enum parallelExceptionHandling = q{
 
 // This mixin causes tasks to be submitted lazily to
 // the task pool.  Attempts are then made by the calling thread to execute
-// them.  It's used in parallel map and foreach.
+// them.  It's used in parallel amap and foreach.
 private enum submitAndExecute = q{
 
     // See documentation for BaseMixin.shouldSetDone.
@@ -3169,20 +3179,21 @@ unittest {
     assert(nums == [0,1,2,3,4]);
 
 
-    assert(poolInstance.map!"a * a"([1,2,3,4,5]) == [1,4,9,16,25]);
-    assert(poolInstance.map!("a * a", "-a")([1,2,3]) ==
+    assert(poolInstance.amap!"a * a"([1,2,3,4,5]) == [1,4,9,16,25]);
+    assert(poolInstance.amap!"a * a"([1,2,3,4,5], new long[5]) == [1,4,9,16,25]);
+    assert(poolInstance.amap!("a * a", "-a")([1,2,3]) ==
         [tuple(1, -1), tuple(4, -2), tuple(9, -3)]);
 
     auto tupleBuf = new Tuple!(int, int)[3];
-    poolInstance.map!("a * a", "-a")([1,2,3], tupleBuf);
+    poolInstance.amap!("a * a", "-a")([1,2,3], tupleBuf);
     assert(tupleBuf == [tuple(1, -1), tuple(4, -2), tuple(9, -3)]);
-    poolInstance.map!("a * a", "-a")([1,2,3], 5, tupleBuf);
+    poolInstance.amap!("a * a", "-a")([1,2,3], 5, tupleBuf);
     assert(tupleBuf == [tuple(1, -1), tuple(4, -2), tuple(9, -3)]);
 
     auto buf = new int[5];
-    poolInstance.map!"a * a"([1,2,3,4,5], buf);
+    poolInstance.amap!"a * a"([1,2,3,4,5], buf);
     assert(buf == [1,4,9,16,25]);
-    poolInstance.map!"a * a"([1,2,3,4,5], 4, buf);
+    poolInstance.amap!"a * a"([1,2,3,4,5], 4, buf);
     assert(buf == [1,4,9,16,25]);
 
 
@@ -3218,14 +3229,14 @@ unittest {
     assert(equal(nums, iota(1000)));
 
     assert(equal(
-        poolInstance.lazyMap!"a * a"(iota(30_000_001), 10_000, 1000),
+        poolInstance.map!"a * a"(iota(30_000_001), 10_000, 1000),
         std.algorithm.map!"a * a"(iota(30_000_001))
     ));
 
     // The filter is to kill random access and test the non-random access
     // branch.
     assert(equal(
-        poolInstance.lazyMap!"a * a"(
+        poolInstance.map!"a * a"(
             filter!"a == a"(iota(30_000_001)
         ), 10_000, 1000),
         std.algorithm.map!"a * a"(iota(30_000_001))
@@ -3233,7 +3244,7 @@ unittest {
 
     assert(
         reduce!"a + b"(0UL,
-            poolInstance.lazyMap!"a * a"(iota(3_000_001), 10_000)
+            poolInstance.map!"a * a"(iota(3_000_001), 10_000)
         ) ==
         reduce!"a + b"(0UL,
             std.algorithm.map!"a * a"(iota(3_000_001))
@@ -3246,8 +3257,8 @@ unittest {
     ));
 
     // Test LazyMap/AsyncBuf chaining.
-    auto lmchain = poolInstance.lazyMap!"a * a"(
-        poolInstance.lazyMap!sqrt(
+    auto lmchain = poolInstance.map!"a * a"(
+        poolInstance.map!sqrt(
             poolInstance.asyncBuf(
                 iota(3_000_000)
             )
@@ -3274,7 +3285,7 @@ unittest {
     }
 }
 
-//version = parallelismStressTest;
+version = parallelismStressTest;
 
 // These are more like stress tests than real unit tests.  They print out
 // tons of stuff and should not be run every time make unittest is run.
@@ -3316,9 +3327,9 @@ version(parallelismStressTest) {
             }
             stderr.writeln("Done modulus test.");
 
-            // Use parallel map to calculate the square of each element in numbers,
+            // Use parallel amap to calculate the square of each element in numbers,
             // and make sure it's right.
-            uint[] squares = poolInstance.map!"a * a"(numbers, 100);
+            uint[] squares = poolInstance.amap!"a * a"(numbers, 100);
             assert(squares.length == numbers.length);
             foreach(i, number; numbers) {
                 assert(squares[i] == number * number);
@@ -3366,8 +3377,7 @@ version(parallelismStressTest) {
                 }
             }
 
-            // Block until all jobs are finished and then shut down the thread pool.
-            poolInstance.join();
+            poolInstance.stop();
         }
 
         assert(attempt == 10);
@@ -3414,7 +3424,7 @@ version(parallelismStressTest) {
                 stderr.writeln(k, '\t', v);
             }
 
-            // Test whether map can be nested.
+            // Test whether amap can be nested.
             real[][] matrix = new real[][](1000, 1000);
             foreach(i; poolInstance.parallel( iota(0, matrix.length) )) {
                 foreach(j; poolInstance.parallel( iota(0, matrix[0].length) )) {
@@ -3428,10 +3438,10 @@ version(parallelismStressTest) {
             }
 
             static real[] parallelSqrt(real[] nums) {
-                return poolInstance.map!mySqrt(nums);
+                return poolInstance.amap!mySqrt(nums);
             }
 
-            real[][] sqrtMatrix = poolInstance.map!parallelSqrt(matrix);
+            real[][] sqrtMatrix = poolInstance.amap!parallelSqrt(matrix);
 
             foreach(i, row; sqrtMatrix) {
                 foreach(j, elem; row) {
@@ -3448,7 +3458,7 @@ version(parallelismStressTest) {
             poolInstance.put(saySuccess);
             saySuccess.workForce();
 
-            // A more thorough test of map, reduce:  Find the sum of the square roots of
+            // A more thorough test of amap, reduce:  Find the sum of the square roots of
             // matrix.
 
             static real parallelSum(real[] input) {
@@ -3456,7 +3466,7 @@ version(parallelismStressTest) {
             }
 
             auto sumSqrt = poolInstance.reduce!"a + b"(
-                poolInstance.map!parallelSum(
+                poolInstance.amap!parallelSum(
                     sqrtMatrix
                 )
             );
