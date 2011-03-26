@@ -848,14 +848,14 @@ the operating system.
 immutable uint totalCPUs;
 
 /**
-This class encapsulates a task queue and a set of worker threads.  A task
-queue is a simple FIFO queue of $(D Task) objects that have been submitted
-to the $(D TaskPool) an are awaiting execution.  Its purpose
+This class encapsulates a task queue and a set of worker threads.  Its purpose
 is to efficiently map a large number of $(D Task)s onto a smaller number of
-threads.  A worker thread is a thread that executes the $(D Task) at the front
-of the queue when one is available and sleeps when the queue is empty.
+threads.  A task queue is a FIFO queue of $(D Task) objects that have been
+submitted to the $(D TaskPool) an are awaiting execution.  A worker thread is a
+thread that executes the $(D Task) at the front of the queue when one is
+available and sleeps when the queue is empty.
 
-This class should usually be used via the default global instantiation,
+This class should usually be used via the global instantiation
 available via the $(XREF parallelism, taskPool) property.
 Occasionally it is useful to explicitly instantiate a $(D TaskPool):
 
