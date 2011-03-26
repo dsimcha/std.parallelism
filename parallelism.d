@@ -1169,11 +1169,11 @@ public:
 
     /**
     Default constructor that initializes a $(D TaskPool) with
-    $(D totalCPUs) - 1.  The minus 1 is included because the main thread
-    will also be available to do work.
+    $(D totalCPUs) - 1 worker threads.  The minus 1 is included because the
+    main thread will also be available to do work.
 
-    Note:  In the case of a single-core machine, the primitives provided
-           by $(D TaskPool) will operate transparently in single-threaded mode.
+    Note:  On single-core machines, the primitives provided by $(D TaskPool)
+           operate transparently in single-threaded mode.
      */
     this() @trusted {
         this(totalCPUs - 1);
@@ -2869,6 +2869,7 @@ private enum string parallelApplyMixin = q{
                 } else {
                     res = dg(elem);
                 }
+                if(res) foreachErr();
                 index++;
             }
         } else {
@@ -2878,6 +2879,7 @@ private enum string parallelApplyMixin = q{
                 } else {
                     res = dg(elem);
                 }
+                if(res) foreachErr();
                 index++;
             }
         }
