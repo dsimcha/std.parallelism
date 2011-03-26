@@ -29,7 +29,7 @@ more worker threads.  If the result of a $(D Task) is needed before execution
 by a worker thread has begun, the $(D Task) can be removed from the task queue
 and executed immediately in the thread where the result is needed.
 
-Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
+Warning:  Unless marked as $(D @trusted) or $(D @safe), artifacts in
           this module allow implicit data sharing between threads and cannot
           guarantee that client code is free from low level data races.
 
