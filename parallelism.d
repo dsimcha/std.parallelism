@@ -13,11 +13,11 @@ object that represents the fundamental unit of work in this library and may be
 executed in parallel with any other $(D Task).  Using $(D Task)
 directly allows programming with a future/promise paradigm.  All other
 supported _parallelism paradigms (parallel foreach, map, reduce, pipelining)
-represent an additional level of abstraction over $(D Task) in that they
+represent an additional level of abstraction over $(D Task).  They
 automatically create one or more $(D Task) objects, or closely related types
 that are conceptually identical but not part of the public API.
 
-After creation, a $(D Task) object may be executed in a new thread, or submitted
+After creation, a $(D Task) may be executed in a new thread, or submitted
 to a $(D TaskPool) for execution.  A $(D TaskPool) encapsulates a task queue
 and its associated worker threads.  Its purpose is to efficiently map a large
 number of $(D Task)s onto a smaller number of threads.  A task queue is a
@@ -26,10 +26,9 @@ $(D TaskPool) and are awaiting execution.  A worker thread is a thread that
 is associated with exactly one task queue.  It executes the $(D Task) at the
 front of its task queue when the task queue has work available, or sleeps when
 no work is available.  Each task queue, in turn, is associated with zero or
-more worker threads.  If the results of a $(D Task) are needed in the
-submitting thread before execution by a worker thread has begun, the $(D Task)
-can be removed from the task queue and executed immediately in the thread where
-the result is needed rather than in a worker thread.
+more worker threads.  If the result of a $(D Task) is needed before execution
+by a worker thread has begun, the $(D Task) can be removed from the task queue
+and executed immediately in the thread where the result is needed.
 
 Warning:  Unless explicitly marked as $(D @trusted) or $(D @safe), artifacts in
           this module allow implicit data sharing between threads and cannot
@@ -351,8 +350,8 @@ template reduceAdjoin(functions...) {
         T reduceAdjoin(T, U)(T lhs, U rhs) {
             alias staticMap!(binaryFun, functions) funs;
 
-            foreach(i, Unused; typeof(lhs.field)) {
-                lhs.field[i] = funs[i](lhs.field[i], rhs);
+            foreach(i, Unused; typeof(lhs.expand)) {
+                lhs.expand[i] = funs[i](lhs.expand[i], rhs);
             }
 
             return lhs;
@@ -369,8 +368,8 @@ private template reduceFinish(functions...) {
         T reduceFinish(T)(T lhs, T rhs) {
             alias staticMap!(binaryFun, functions) funs;
 
-            foreach(i, Unused; typeof(lhs.field)) {
-                lhs.field[i] = funs[i](lhs.field[i], rhs.field[i]);
+            foreach(i, Unused; typeof(lhs.expand)) {
+                lhs.expand[i] = funs[i](lhs.expand[i], rhs.expand[i]);
             }
 
             return lhs;
@@ -388,7 +387,7 @@ private template ElementsCompatible(R, A) {
 }
 
 /**
-This struct represents the fundamental unit of work.  A $(D Task) may be
+$(D Task) represents the fundamental unit of work.  A $(D Task) may be
 executed in parallel with any other $(D Task).  Using this struct directly
 allows future/promise _parallelism.  In this paradigm, a function (or delegate,
 functor, etc.) is executed in a thread other than the one it was called from.
@@ -398,7 +397,7 @@ ensure that execution of the $(D Task) has completed and to obtain the return
 value, if any.
 
 The proper way to create an instance of this struct is via the
-$(XREF parallelism, task) and $(XREF parallelism, scopedTask) function.
+$(XREF parallelism, task) and $(XREF parallelism, scopedTask) functions.
 See $(D task) for usage examples.
 
 Function results are returned from $(D yieldForce), $(D spinForce) and
@@ -474,7 +473,10 @@ struct Task(alias fun, Args...) {
     }
 
 
-    /// The return type of the function called by this $(D Task).
+    /**
+    The return type of the function called by this $(D Task).  This can be
+    void.
+    */
     alias typeof(fun(_args)) ReturnType;
 
     static if(!is(ReturnType == void)) {
@@ -506,7 +508,7 @@ struct Task(alias fun, Args...) {
     }
 
     /**
-    If the task isn't started yet, execute it in the current thread.
+    If the $(D Task) isn't started yet, execute it in the current thread.
     If it's done, return its return value, if any.  If it's in progress,
     busy spin until it's done, then return the return value.  If it threw
     an exception, rethrow that exception.
@@ -539,7 +541,7 @@ struct Task(alias fun, Args...) {
 
     This function should be used when you expect the result of the
     task to take a while, as waiting on a condition variable
-    introduces latency, but results in negligible wasted CPU cycles.
+    introduces latency, but avoids wasted CPU cycles.
      */
     @property ref ReturnType yieldForce() @trusted {
         enforcePool();
@@ -627,7 +629,7 @@ struct Task(alias fun, Args...) {
     }
 
     /**
-    Returns true if the $(D Task) is finished executing.
+    Returns $(D true) if the $(D Task) is finished executing.
 
     Throws:  Rethrows any exception thrown during the execution of the
              $(D Task).
@@ -675,7 +677,10 @@ ReturnType!(F) run(F, Args...)(F fpOrDelegate, ref Args args) {
 
 
 /**
-Creates a $(D Task) on the GC heap that calls an alias.
+Creates a $(D Task) on the GC heap that calls an alias.  This may be executed
+via $(D Task.executeInNewThread) or by submitting to a
+$(XREF parallelism, TaskPool).  A globally accessible instance of
+$(D TaskPool) is provided by $(XREF parallelism, taskPool).
 
 Returns:  A pointer to the $(D Task).
 
@@ -685,7 +690,7 @@ Examples:
 import std.file;
 
 void main() {
-    // Create and submit a Task object for reading foo.txt.
+    // Create and execute a Task for reading foo.txt.
     auto file1Task = task!read("foo.txt");
     file1Task.executeInNewThread();
 
@@ -741,7 +746,7 @@ auto task(alias fun, Args...)(Args args) {
 
 /**
 Create a $(D Task) on the GC heap that calls a function pointer, delegate, or
-functor.
+class/struct with overloaded opCall.
 
 Examples:
 ---
@@ -750,7 +755,7 @@ Examples:
 import std.file;
 
 void main() {
-    // Create and submit a Task object for reading foo.txt.
+    // Create and execute a Task for reading foo.txt.
     auto file1Task = task(&read, "foo.txt");
     file1Task.executeInNewThread();
 
@@ -801,9 +806,9 @@ if(is(typeof(fun(args))) && isSafeTask!F) {
 }
 
 /**
-These functions allow the creation of Task objects that are returned by value.
-The lifetime of a $(D Task) created by $(D scopedTask) cannot exceed the
-lifetime of the scope in which it was created.
+These functions allow the creation of $(D Task) objects on the stack rather
+than the GC heap.  The lifetime of a $(D Task) created by $(D scopedTask)
+cannot exceed the lifetime of the scope in which it was created.
 
 $(D scopedTask) might be preferred over $(D task):
 
@@ -819,8 +824,7 @@ Usage is otherwise identical to $(D task).
 
 Notes:  $(D Task) objects created using $(D scopedTask) will automatically
 call $(D Task.yieldForce) in their destructor if necessary to ensure that
-the $(D Task) is complete before the stack frame on which they reside is
-destroyed.
+the $(D Task) is complete before the stack frame they reside on is destroyed.
 */
 auto scopedTask(alias fun, Args...)(Args args) {
     auto ret = Task!(fun, Args)(args);
@@ -845,7 +849,7 @@ if(is(typeof(fun(args))) && isSafeTask!F) {
 }
 
 /**
-The total number of CPUs available on the current machine, as reported by
+The total number of CPU cores available on the current machine, as reported by
 the operating system.
 */
 immutable uint totalCPUs;
@@ -859,15 +863,15 @@ threads.  A worker thread is a thread that executes the $(D Task) at the front
 of the task queue when one is available and sleeps when the task queue is empty.
 
 This class should usually be used via the default global instantiation,
-available via the global $(D taskPool) property, which is described below.
+available via the $(XREF parallelism, taskPool) property.
 Occasionally it may be useful to explicitly instantiate a $(D TaskPool) object:
 
 1.  When you want $(D TaskPool) instances with multiple priorities, for example
     a low priority pool and a high priority pool.
 
-2.  When the threads in the global task pool are blocked waiting for
-    some code to execute, and you want to parallelize the code that these
-    threads are waiting on.
+2.  When the threads in the global task pool are waiting on a synchronization
+    primitive (for example a mutex), and you want to parallelize the code that
+    needs to run before these threads can be resumed.
  */
 final class TaskPool {
 private:
@@ -1216,9 +1220,8 @@ public:
     balancing, but larger work units can avoid the overhead of creating and
     submitting large numbers of $(D Task) objects.  Generally, the less time
     a single iteration of the loop takes, the larger $(D workUnitSize) should
-    be.  For very expensive loop bodies, $(D workUnitSize) should simply
-    be set to 1.  An overload that chooses a default work unit size is
-    also available.
+    be.  For very expensive loop bodies, $(D workUnitSize) should  be 1.  An
+    overload that chooses a default work unit size is also available.
 
     Examples:
     ---
@@ -1248,9 +1251,8 @@ public:
     Notes:
 
     This implementation of parallel foreach lazily submits $(D Task) objects
-    to the task queue, rather than eagerly submitting all of them upfront.
-    This means memory usage is constant in the length of $(D range) for fixed
-    work unit size.
+    to the task queue.  This means memory usage is constant in the length of
+    $(D range) for fixed work unit size.
 
     Breaking from a parallel foreach loop via a break, labeled break,
     labeled continue, return or goto statement throws a
@@ -1261,7 +1263,7 @@ public:
     the parallel portion of the loop.  The exception is that, if a parallel
     foreach is executed over a range returned by $(D asyncBuf) or $(D map),
     the copying is elided and the buffers are simply swapped.  In this case
-    $(D workUnitSize) is ignored and the work unit size will be set to the
+    $(D workUnitSize) is ignored and the work unit size is set to the
     buffer size of the object returned by $(D asyncBuf) or $(D map).
 
     $(B Exception Handling):
@@ -1272,7 +1274,6 @@ public:
     enqueued work units are allowed to complete.  Then, all exceptions that
     were thrown by any work unit are chained using $(D Throwable.next) and
     rethrown.  The order of the exception chaining is non-deterministic.
-
     */
     ParallelForeach!R parallel(R)(R range, size_t workUnitSize) {
         enforce(workUnitSize > 0, "workUnitSize must be > 0.");
@@ -1299,9 +1300,9 @@ public:
     Eager parallel map.  The eagerness of this function means it has less
     overhead than the lazily evaluated $(D TaskPool.map) and should be
     preferred where the memory requirements of eagerness are acceptable.
-    $(D functions) are the functions to be evaluated,
-    passed as template alias parameters in a style similar to
-    $(XREF algorithm, map).  The first argument must be a random access range.
+    $(D functions) are the functions to be evaluated, passed as template alias
+    parameters in a style similar to $(XREF algorithm, map).  The first
+    argument must be a random access range.
 
     ---
     auto numbers = iota(100_000_000);
@@ -1310,7 +1311,7 @@ public:
     //
     // Timings on an Athlon 64 X2 dual core machine:
     //
-    // Parallel amap:                         0.802 s
+    // Parallel eager map:                   0.802 s
     // Equivalent serial implementation:     1.768 s
     auto squareRoots = taskPool.amap!sqrt(numbers);
     ---
@@ -1321,13 +1322,14 @@ public:
     default work unit size is used.
 
     ---
-    // Same thing, but make work units explicitly of size 100.
+    // Same thing, but make work unit size 100.
     auto squareRoots = taskPool.amap!sqrt(numbers, 100);
     ---
 
     An optional buffer for returning the results may be provided as the last
-    argument.  If one is not provided, one will be automatically allocated.
-    If one is provided, it must be the same length as the range.
+    argument.  If one is not provided, one will be automatically allocated on
+    the garbage collected heap.  If one is provided, it must be the same length
+    as the range.
 
     ---
     // Same thing, but explicitly pre-allocate a buffer.  The element type of
@@ -1343,11 +1345,11 @@ public:
 
     $(B Exception Handling):
 
-    When at least one exception is thrown from inside the map function,
+    When at least one exception is thrown from inside the map functions,
     the submission of additional $(D Task) objects is terminated as soon as
     possible, in a non-deterministic manner.  All currently executing or
     enqueued work units are allowed to complete.  Then, all exceptions that
-    were thrown by any work unit are chained using $(D Throwable.next) and
+    were thrown from any work unit are chained using $(D Throwable.next) and
     rethrown.  The order of the exception chaining is non-deterministic.
      */
     template amap(functions...) {
@@ -1486,7 +1488,7 @@ public:
 
     Parameters:
 
-    $(D range):  The range to be mapped.  This must be an input range, though it
+    $(D range):  The range to be mapped.  This must be an input range.  It
     should preferably be a random access range to avoid needing to buffer
     to temporary array before mapping.  If $(D range) is not random access
     it will be lazily buffered to an array of size $(D bufSize) before the map
@@ -1883,16 +1885,16 @@ public:
     }
 
     /**
-    Parallel reduce.  Except as otherwise noted, usage is similar to
-    $(XREF algorithm, reduce).  This function works by splitting the range to
-    be reduced into work units, which are slices to be reduced in parallel.
-    Once the results from all work units are computed, a final serial
+    Parallel reduce on a random access range.  Except as otherwise noted, usage
+    is similar to $(XREF algorithm, reduce).  This function works by splitting
+    the range to be reduced into work units, which are slices to be reduced in
+    parallel.  Once the results from all work units are computed, a final serial
     reduction is performed on these results to compute the final answer.
     Therefore, care must be taken to choose the seed value appropriately.
 
     Furthermore, because the reduction is being performed in parallel,
-    $(D fun) must be associative.  For notational simplicity, let # be an
-    infix operator representing $(D fun).  Then, (a # b) # c must equal
+    $(D functions) must be associative.  For notational simplicity, let # be an
+    infix operator representing $(D functions).  Then, (a # b) # c must equal
     a # (b # c).  Floating point addition is not associative
     even though addition in exact arithmetic is.  Therefore, summing floating
     point numbers using this function may give different results than summing
@@ -1900,12 +1902,11 @@ public:
     can be treated as associative.
 
     An optional explicit seed may be provided as the first argument.  If
-    provided, it is used as the seed for all work units (i.e. slices of the
-    range that are reduced in parallel) and for the final reduction of
-    results from all work units.  Therefore, if it is not the identity value
-    for the operation being performed, results may differ from those generated
-    by $(D std.algorithm.reduce) or depending on how many work units are used.
-    The next argument must be the range to be reduced.
+    provided, it is used as the seed for all work units and for the final
+    reduction of results from all work units.  Therefore, if it is not the
+    identity value for the operation being performed, results may differ from
+    those generated by $(D std.algorithm.reduce) or depending on how many work
+    units are used.  The next argument must be the range to be reduced.
     ---
     // Find the sum of squares of a range in parallel, using an explicit seed.
     //
@@ -1928,7 +1929,7 @@ public:
 
     An explicit work unit size may optionally be specified as the last argument.
     Specifying too small a work unit size will effectively serialize the
-    reduction, as the final reduction of the results of each work unit will
+    reduction, as the final reduction of the result of each work unit will
     dominate computation time.  If the $(D TaskPool.size) for this instance
     is zero, this parameter is ignored and one work unit is used.
     ---
@@ -1939,20 +1940,20 @@ public:
     auto sum3 = taskPool.reduce!"a + b"(0.0, nums, 100);
     ---
 
-    Parallel reduce works with multiple functions, like
+    Parallel reduce supports multiple functions, like
     $(D std.algorithm.reduce).
     ---
     // Find both the min and max of nums.
     auto minMax = taskPool.reduce!(min, max)(nums);
-    assert(minMax.field[0] == reduce!min(nums));
-    assert(minMax.field[1] == reduce!max(nums));
+    assert(minMax[0] == reduce!min(nums));
+    assert(minMax[1] == reduce!max(nums));
     ---
 
     $(B Exception Handling):
 
-    After all work units are finished executing, if any exceptions were thrown
-    they are chained together via $(D Throwable.next) and rethrown.  The order
-    in which the exceptions are chained is non-deterministic.
+    After all work units are finished executing, any exceptions thrown
+    are chained together via $(D Throwable.next) and rethrown.  The chaining
+    order is non-deterministic.
      */
     template reduce(functions...) {
 
@@ -1977,8 +1978,8 @@ public:
                     typeof(adjoin!(staticMap!(binaryFun, functions))(e, e))
                         seed = void;
                     foreach (i, T; seed.Types) {
-                        auto p = (cast(void*) &seed.field[i])
-                            [0 .. seed.field[i].sizeof];
+                        auto p = (cast(void*) &seed.expand[i])
+                            [0 .. seed.expand[i].sizeof];
                         emplace!T(p, e);
                     }
 
@@ -2108,12 +2109,12 @@ public:
     /**
     Struct for creating worker-local storage.  Worker-local storage is
     thread-local storage that exists only for worker threads in a given
-    $(D TaskPool) plus a single thread outside the pool, is allocated on the
+    $(D TaskPool) plus a single thread outside the pool.  It is allocated on the
     garbage collected heap in a way that avoids false sharing, and doesn't
     necessarily have global scope within any thread.  It can be accessed from
-    any worker thread in the pool that created  it, and one thread outside this
-    $(D TaskPool).  All threads outside the pool that created a given instance
-    of worker-local storage share a single slot.
+    any worker thread in the $(D TaskPool) that created it, and one thread
+    outside this $(D TaskPool).  All threads outside the pool that created a
+    given instance of worker-local storage share a single slot.
 
     Since the underlying data for this struct is heap-allocated, this struct
     has reference semantics when passed between functions.
@@ -2283,7 +2284,7 @@ public:
     The proper way to instantiate this object is to call
     $(D WorkerLocalStorage.toRange).  Once instantiated, this object behaves
     as a finite random-access range with assignable, lvalue elemends and
-    a length equal to the number of worker threads in the task pool that
+    a length equal to the number of worker threads in the $(D TaskPool) that
     created it plus 1.
      */
     static struct WorkerLocalStorageRange(T) {
@@ -2368,13 +2369,15 @@ public:
     }
 
     /**
-    Terminates all threads in the pool without waiting for the queue to be
-    empty.  Use only if you have waitied on every $(D Task) and therefore know
-    there can't be more in queue, or if you speculatively executed some tasks
-    and no longer need the results.
+    Signals to all worker threads to terminate as soon as they are finished
+    with their current $(D Task), or immediately if they are not executing a
+    $(D Task).  $(D Task)s that were in queue will not be executed unless
+    a call to $(D Task.waitForce), $(D Task.yieldForce) or $(D Task.spinForce)
+    causes them to be executed.
 
-    Note:  Does not affect tasks that are already executing, only those
-    in queue.
+    Use only if you have waitied on every $(D Task) and
+    therefore know there can't be more in queue, or if you speculatively
+    executed some tasks and no longer need the results.
      */
     void stop() @trusted {
         lock();
@@ -2421,7 +2424,7 @@ public:
     }
 
     /**
-    Instructs worker threads to terminate when the queue becomes empty.  Does
+    Signals worker threads to terminate when the queue becomes empty.  Does
     not block.
      */
     void finish() @trusted {
@@ -2453,15 +2456,16 @@ public:
 
     Notes:
 
-    @trusted overloads of this function are called for $(D Task)s that either
-    return a type for which $(XREF traits, hasUnsharedAliasing) is false or the
-    function to be executed is $(D pure).  $(D Task) objects that meet all
-    other requirements specified in the $(D @trusted) overloads of $(D task)
-    and $(D scopedTask) may be executed from $(D @safe) code via
-    $(D Task.executeInNewThread) but not via $(D TaskPool).
+    @trusted overloads of this function are called for $(D Task)s if either
+    $(XREF traits, hasUnsharedAliasing) is false for the $(D Task)'s
+    return type or the function the $(D Task) executes is $(D pure).
+    $(D Task) objects that meet all other requirements specified in the
+    $(D @trusted) overloads of $(D task) and $(D scopedTask) may be created
+    and executed from $(D @safe) code via $(D Task.executeInNewThread) but
+    not via $(D TaskPool).
 
     While this function takes the address of variables that may
-    potentially be on the stack, some overloads are marked as @trusted.
+    be on the stack, some overloads are marked as @trusted.
     $(D Task) includes a destructor that waits for the task to complete
     before destroying the stack frame it is allocated on.  Therefore,
     it is impossible for the stack frame to be destroyed before the task is
@@ -2552,8 +2556,8 @@ public:
 Returns a lazily initialized default instantiation of $(D TaskPool).
 This function can safely be called concurrently from multiple non-worker
 threads.  The worker threads in this pool are daemon threads, meaning that it
-is not necessary to explicitly call $(D taskPool.stop)
-or $(D taskPool.finish) before terminating the main thread.
+is not necessary to explicitly call $(D TaskPool.stop)
+or $(D TaskPool.finish) before terminating the main thread.
 
 One instance of this pool is shared across the entire program.
 */
@@ -3518,4 +3522,3 @@ version(parallelismStressTest) {
         }
     }
 }
-void main(){}
