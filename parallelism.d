@@ -25,7 +25,7 @@ simple FIFO queue of $(D Task) objects that have been submitted to the
 $(D TaskPool) and are awaiting execution.  A worker thread is a thread that
 is associated with exactly one task queue.  It executes the $(D Task) at the
 front of its task queue when the task queue has work available, or sleeps when
-no work is available.  Each task queue, in turn, is associated with zero or
+no work is available.  Each task queue is associated with zero or
 more worker threads.  If the result of a $(D Task) is needed before execution
 by a worker thread has begun, the $(D Task) can be removed from the task queue
 and executed immediately in the thread where the result is needed.
