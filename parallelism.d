@@ -738,7 +738,7 @@ auto task(alias fun, Args...)(Args args) {
 }
 
 /**
-Create a $(D Task) on the GC heap that calls a function pointer, delegate, or
+Creates a $(D Task) on the GC heap that calls a function pointer, delegate, or
 class/struct with overloaded opCall.
 
 Examples:
@@ -772,7 +772,7 @@ if(is(typeof(delegateOrFp(args))) && !isSafeTask!F) {
 }
 
 /**
-Version of Task, usable from $(D @safe) code.  Usage mechanics are
+Version of $(D task) usable from $(D @safe) code.  Usage mechanics are
 identical to the non-@safe case, but safety introduces the some restrictions.
 
 1.  $(D fun) must be @safe or @trusted.
@@ -851,7 +851,7 @@ immutable uint totalCPUs;
 This class encapsulates a task queue and a set of worker threads.  Its purpose
 is to efficiently map a large number of $(D Task)s onto a smaller number of
 threads.  A task queue is a FIFO queue of $(D Task) objects that have been
-submitted to the $(D TaskPool) an are awaiting execution.  A worker thread is a
+submitted to the $(D TaskPool) and are awaiting execution.  A worker thread is a
 thread that executes the $(D Task) at the front of the queue when one is
 available and sleeps when the queue is empty.
 
@@ -1255,7 +1255,7 @@ public:
     of the loop.  The exception is that, if a parallel foreach is executed
     over a range returned by $(D asyncBuf) or $(D map), the copying is elided
     and the buffers are simply swapped.  In this case $(D workUnitSize) is
-    ignored and the work unit size is set to the  buffer size $(D range).
+    ignored and the work unit size is set to the  buffer size of $(D range).
 
     $(B Exception Handling):
 
@@ -1877,7 +1877,7 @@ public:
 
     /**
     Parallel reduce on a random access range.  Except as otherwise noted, usage
-    is similar to $(XREF algorithm, reduce).  This function works by splitting
+    is similar to $(D std.algorithm.reduce) .  This function works by splitting
     the range to be reduced into work units, which are slices to be reduced in
     parallel.  Once the results from all work units are computed, a final serial
     reduction is performed on these results to compute the final answer.
@@ -1931,7 +1931,8 @@ public:
     auto sum3 = taskPool.reduce!"a + b"(0.0, nums, 100);
     ---
 
-    Parallel reduce supports multiple functions, like $(D std.algorithm.reduce).
+    Parallel reduce supports multiple functions, like
+    $(D std.algorithm.reduce).
     ---
     // Find both the min and max of nums.
     auto minMax = taskPool.reduce!(min, max)(nums);
@@ -2100,7 +2101,7 @@ public:
     Struct for creating worker-local storage.  Worker-local storage is
     thread-local storage that exists only for worker threads in a given
     $(D TaskPool) plus a single thread outside the pool.  It is allocated on the
-    garbage collected heap in a way that avoids false sharing, and doesn't
+    garbage collected heap in a way that avoids _false sharing, and doesn't
     necessarily have global scope within any thread.  It can be accessed from
     any worker thread in the $(D TaskPool) that created it, and one thread
     outside this $(D TaskPool).  All threads outside the pool that created a
@@ -2342,7 +2343,7 @@ public:
     }
 
     /**
-    Create an instance of worker-local storage, initialized with a given
+    Creates an instance of worker-local storage, initialized with a given
     value.  The value is $(D lazy) so that you can, for example, easily
     create one instance of a class for each worker.  For usage example,
     see the $(D WorkerLocalStorage) struct.
