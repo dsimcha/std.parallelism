@@ -141,7 +141,7 @@ version(Windows) {
     static assert(0, "Don't know how to get N CPUs on this OS.");
 }
 
-/* Atomics code.  These just forward to core.atomic, but are written like this
+/* Atomics code.  These mostly forward to core.atomic, but are written like this
    for two reasons:
 
    1.  They used to actually contain ASM code and I don' want to have to change
@@ -389,7 +389,10 @@ or other callable) is executed in a thread other than the one it was called
 from.  The calling thread does not block while the function is being executed.
 A call to $(D workForce), $(D yieldForce), or $(D spinForce) is used to
 ensure that the $(D Task) has finished executing and to obtain the return
-value, if any.
+value, if any.  These functions and $(D done) also act as full memory barriers,
+meaning that any memory writes made in the thread that executed the $(D Task)
+are guaranteed to be visible in the calling thread after one of these functions
+returns.
 
 The $(XREF parallelism, task) and $(XREF parallelism, scopedTask) functions can
 be used to create an instance of this struct.  See $(D task) for usage examples.
@@ -1257,6 +1260,9 @@ public:
     and the buffers are simply swapped.  In this case $(D workUnitSize) is
     ignored and the work unit size is set to the  buffer size of $(D range).
 
+    A memory barrier is guaranteed to be executed on exit from the loop,
+    so that results produced by all threads are visible in the calling thread.
+
     $(B Exception Handling):
 
     When at least one exception is thrown from inside a parallel foreach loop,
@@ -1333,6 +1339,12 @@ public:
     auto results = new Tuple!(float, real)[numbers.length];
     taskPool.amap!(sqrt, log)(numbers, 100, results);
     ---
+
+    Note:
+
+    A memory barrier is guaranteed to be executed after all results are written
+    but before returning so that results produced by all threads are visible
+    in the calling thread.
 
     $(B Exception Handling):
 
@@ -1479,15 +1491,15 @@ public:
     but avoids the need to keep all results in memory simultaneously and works
     with non-random access ranges.
 
-    Parameters:
+    Params:
 
-    $(D range):  The input range to be mapped.  If $(D range) is not random
+    range = The input range to be mapped.  If $(D range) is not random
     access it will be lazily buffered to an array of size $(D bufSize) before
     the map function is evaluated.  (For an exception to this rule, see Notes.)
 
-    $(D bufSize):  The size of the buffer to store the evaluated elements.
+    bufSize = The size of the buffer to store the evaluated elements.
 
-    $(D workUnitSize):  The number of elements to evaluate in a single
+    workUnitSize = The number of elements to evaluate in a single
     $(D Task).  Must be less than or equal to $(D bufSize), and
     should be a fraction of $(D bufSize) such that all worker threads can be
     used.  If the default of size_t.max is used, workUnitSize will be set to
@@ -2258,7 +2270,13 @@ public:
                 *stillThreadLocal = false;
 
                 // Make absolutely sure results are visible to all threads.
-                synchronized {}
+                // This is probably not necessary since some other
+                // synchronization primitive will be used to signal that the
+                // parallel part of the algorithm is done, but the
+                // performance impact should be negligible, so it's better
+                // to be safe.
+                ubyte barrierDummy;
+                atomicSetUbyte(barrierDummy, 1);
             }
 
            return WorkerLocalStorageRange!(T)(this);
@@ -2354,7 +2372,12 @@ public:
         foreach(i; 0..size + 1) {
             ret[i] = initialVal;
         }
-        synchronized {}  // Make sure updates are visible in all threads.
+
+        // Memory barrier to make absolutely sure that what we wrote is
+        // visible to worker threads.
+        ubyte barrierDummy;
+        atomicSetUbyte(barrierDummy, 0);
+
         return ret;
     }
 
@@ -3510,3 +3533,4 @@ version(parallelismStressTest) {
         }
     }
 }
+void main() {}
