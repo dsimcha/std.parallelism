@@ -1224,7 +1224,7 @@ public:
     // Find the logarithm of every number from 1 to 1_000_000 in parallel.
     auto logs = new double[1_000_000];
 
-    // Parallel foreach works with or without an index variable.  It can be
+    // Parallel foreach works with or without an index variable.  It can
     // iterate by ref if range.front returns by ref.
 
     // Iterate over logs using work units of size 100.
@@ -3533,4 +3533,3 @@ version(parallelismStressTest) {
         }
     }
 }
-void main() {}
