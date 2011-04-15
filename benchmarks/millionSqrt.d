@@ -45,7 +45,7 @@ void main(string[] args) {
 
     sw.reset();
     foreach(iter; 0..nIter) {
-        taskPool.map!sqrt(nums, buf);
+        taskPool.amap!sqrt(nums, buf);
     }
     writefln("Did parallel map millionSqrt in %s milliseconds.", sw.peek.msecs);
 }

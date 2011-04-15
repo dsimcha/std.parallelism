@@ -16,9 +16,7 @@ enum Parallel : bool {
     no = false
 }
 
-// n by n matrix.  Smaller n's seem to be too fine-grained.  Larger n's seem
-// to bottleneck on memory bandwidth.  At n=256, speedups are close to linear,
-// at least for 2 cores.
+// n by n matrix.
 enum n = 1024;
 
 void invert(Parallel parallel)(float[][] from, float[][] to) {

@@ -1,7 +1,7 @@
 /**
 This benchmark tests the efficiency of pipelining using AsyncBuf and
-LazyMap.  We first create an input range for generating a large number of
-numeric strings.  We then use LazyMap and AsyncBuf to pipeline reading from
+Map.  We first create an input range for generating a large number of
+numeric strings.  We then use Map and AsyncBuf to pipeline reading from
 this range, converting its values from strings to floats, rounding these
 floats to ints, and finding the greatest common divisor of these ints with
 the nunmber 8675309.
@@ -67,9 +67,9 @@ void doSerial() {
 void doParallel() {
     auto numStrs = StringNums(8675309);
     auto numStrBuf = taskPool.asyncBuf(take(numStrs, nTake), 1024);
-    auto floats = taskPool.lazyMap!(to!float)(numStrBuf);
-    auto ints = taskPool.lazyMap!(to!int)(floats);
+    auto floats = taskPool.map!(to!float)(numStrBuf);
+    auto ints = taskPool.map!(to!int)(floats);
 
-    auto gcds = taskPool.lazyMap!gcd8675309(ints);
+    auto gcds = taskPool.map!gcd8675309(ints);
     foreach(elem; gcds) {}
 }

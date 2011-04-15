@@ -61,7 +61,7 @@ void qsort(Parallel parallel, T)(T[] data) {
     Task!(qsort!(Parallel.yes, T), T[]) recurseTask;
     if(greater.length > less.length) {
         if(parallel && less.length >= minParallel) {
-            recurseTask = task!(qsort!(Parallel.yes, T))(less);
+            recurseTask = scopedTask!(qsort!(Parallel.yes, T))(less);
             taskPool.put(recurseTask);
         } else {
             qsort!(parallel)(less);
@@ -69,7 +69,7 @@ void qsort(Parallel parallel, T)(T[] data) {
         qsort!(parallel)(greater);
     } else {
         if(parallel && greater.length >= minParallel) {
-            recurseTask = task!(qsort!(Parallel.yes, T))(greater);
+            recurseTask = scopedTask!(qsort!(Parallel.yes, T))(greater);
             taskPool.put(recurseTask);
         } else {
             qsort!(parallel, T)(greater);
