@@ -1224,7 +1224,7 @@ public:
     // Find the logarithm of every number from 1 to 1_000_000 in parallel.
     auto logs = new double[1_000_000];
 
-    // Parallel foreach works with or without an index variable.  It can
+    // Parallel foreach works with or without an index variable.  It can be
     // iterate by ref if range.front returns by ref.
 
     // Iterate over logs using work units of size 100.
@@ -1587,11 +1587,6 @@ public:
 
                 } else static if(is(typeof(range.buf1)) && is(typeof(range.bufPos)) &&
                   is(typeof(range.doBufSwap()))) {
-
-                    version(unittest) {
-                        pragma(msg, "LazyRange Special Case:  "
-                            ~ typeof(range).stringof);
-                    }
 
                     alias typeof(range.buf1) FromType;
                     FromType from;
@@ -2694,7 +2689,7 @@ if(isRandomAccessRange!R && hasLength!R) {
         pool.lock();
         scope(exit) pool.unlock();
 
-        // No work stealing here b/c the function that waits on this task
+        // No trying to execute here b/c the function that waits on this task
         // wants to recycle it as soon as it finishes.
         while(!done()) {
             pool.waitUntilCompletion();
@@ -2920,11 +2915,6 @@ private enum string parallelApplyMixin = q{
     static if(is(typeof(range.buf1)) && is(typeof(range.bufPos)) &&
     is(typeof(range.doBufSwap()))) {
         enum bool bufferTrick = true;
-
-        version(unittest) {
-            pragma(msg, "Parallel Foreach Buffer Trick:  " ~ R.stringof);
-        }
-
     } else {
         enum bool bufferTrick = false;
     }
@@ -3021,7 +3011,7 @@ private enum string parallelApplyMixin = q{
 
         // Now that we've submitted all the worker tasks, submit
         // the next submission task.  Synchronizing on the pool
-        // to prevent the stealing thread from deleting the job
+        // to prevent some other thread from deleting the job
         // before it's submitted.
         pool.lock();
         atomicSetUbyte(submitNextBatch.taskStatus, TaskState.notStarted);
@@ -3300,29 +3290,20 @@ unittest {
     }
 }
 
-version = parallelismStressTest;
+//version = parallelismStressTest;
 
 // These are more like stress tests than real unit tests.  They print out
 // tons of stuff and should not be run every time make unittest is run.
 version(parallelismStressTest) {
-    // These unittests are intended to also function as an example of how to
-    // use this module.
     unittest {
         size_t attempt;
         for(; attempt < 10; attempt++)
         foreach(poolSize; [0, 4]) {
 
-            // Create a TaskPool object with the default number of threads.
             poolInstance = new TaskPool(poolSize);
 
-            // Create some data to work on.
             uint[] numbers = new uint[1_000];
 
-            // Fill in this array in parallel, using default block size.
-            // Note:  Be careful when writing to adjacent elements of an arary from
-            // different threads, as this can cause word tearing bugs when
-            // the elements aren't properly aligned or aren't the machine's native
-            // word size.  In this case, though, we're ok.
             foreach(i; poolInstance.parallel( iota(0, numbers.length)) ) {
                 numbers[i] = cast(uint) i;
             }
@@ -3334,16 +3315,13 @@ version(parallelismStressTest) {
 
             stderr.writeln("Done creating nums.");
 
-            // Parallel foreach also works on non-random access ranges, albeit
-            // less efficiently.
+
             auto myNumbers = filter!"a % 7 > 0"( iota(0, 1000));
             foreach(num; poolInstance.parallel(myNumbers)) {
                 assert(num % 7 > 0 && num < 1000);
             }
             stderr.writeln("Done modulus test.");
 
-            // Use parallel amap to calculate the square of each element in numbers,
-            // and make sure it's right.
             uint[] squares = poolInstance.amap!"a * a"(numbers, 100);
             assert(squares.length == numbers.length);
             foreach(i, number; numbers) {
@@ -3351,37 +3329,26 @@ version(parallelismStressTest) {
             }
             stderr.writeln("Done squares.");
 
-            // Sum up the array in parallel with the current thread.
             auto sumFuture = task!( reduce!"a + b" )(numbers);
             poolInstance.put(sumFuture);
 
-            // Go off and do other stuff while that future executes:
-            // Find the sum of squares of numbers.
             ulong sumSquares = 0;
             foreach(elem; numbers) {
                 sumSquares += elem * elem;
             }
 
-            // Ask for our result.  If the pool has not yet started working on
-            // this task, spinForce() automatically steals it and executes it in this
-            // thread.
             uint mySum = sumFuture.spinForce();
             assert(mySum == 999 * 1000 / 2);
 
-            // We could have also computed this sum in parallel using parallel
-            // reduce.
             auto mySumParallel = poolInstance.reduce!"a + b"(numbers);
             assert(mySum == mySumParallel);
             stderr.writeln("Done sums.");
 
-            // Execute an anonymous delegate as a task.
             auto myTask = task({
                 synchronized writeln("Our lives are parallel...Our lives are parallel.");
             });
             poolInstance.put(myTask);
 
-            // Parallel foreach loops can also be nested, and can have an index
-            // variable attached to the foreach loop.
             auto nestedOuter = "abcd";
             auto nestedInner =  iota(0, 10, 2);
 
@@ -3432,7 +3399,7 @@ version(parallelismStressTest) {
                 atomicIncUint( nJobsByThread[ cast(void*) Thread.getThis() ]);
             }
 
-            stderr.writeln("\nCurrent (stealing) thread is:  ",
+            stderr.writeln("\nCurrent thread is:  ",
                 cast(void*) Thread.getThis());
             stderr.writeln("Workload distribution:  ");
             foreach(k, v; nJobsByThread) {
