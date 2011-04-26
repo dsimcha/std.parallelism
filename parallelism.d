@@ -141,7 +141,7 @@ version(Windows) {
     static assert(0, "Don't know how to get N CPUs on this OS.");
 }
 
-/* Atomics code.  These mostly forward to core.atomic, but are written like this
+/* Atomics code.  These forward to core.atomic, but are written like this
    for two reasons:
 
    1.  They used to actually contain ASM code and I don' want to have to change
@@ -155,27 +155,8 @@ private void atomicSetUbyte(ref ubyte stuff, ubyte newVal) {
     core.atomic.cas(cast(shared) &stuff, stuff, newVal);
 }
 
-// Cut and pasted from core.atomic.  See Bug 4760.
-version(D_InlineAsm_X86) {
-    private ubyte atomicReadUbyte(ref ubyte val) {
-        asm {
-            mov DL, 0;
-            mov AL, 0;
-            mov ECX, val;
-            lock; // lock always needed to make this op atomic
-            cmpxchg [ECX], DL;
-        }
-    }
-} else version(D_InlineAsm_X86_64) {
-    private ubyte atomicReadUbyte(ref ubyte val) {
-        asm {
-            mov DL, 0;
-            mov AL, 0;
-            mov RCX, val;
-            lock; // lock always needed to make this op atomic
-            cmpxchg [RCX], DL;
-        }
-    }
+private ubyte atomicReadUbyte(ref ubyte val) {
+    return atomicLoad(cast(shared) val);
 }
 
 // This gets rid of the need for a lot of annoying casts in other parts of the
@@ -188,7 +169,8 @@ private bool atomicCasUbyte(ref ubyte stuff, ubyte testVal, ubyte newVal) {
 // core.atomic.  This should really just use lock; inc; on x86.  This function
 // is not called frequently, though, so it might not matter in practice.
 private void atomicIncUint(ref uint num) {
-    atomicOp!"+="(num, 1U);
+    auto ptr = cast(shared) &num;
+    atomicOp!"+="(*ptr, 1U);
 }
 
 //-----------------------------------------------------------------------------
@@ -1597,7 +1579,11 @@ public:
                         assert(range.buf1.length <= from.length);
                         from.length = range.buf1.length;
                         swap(range.buf1, from);
-                        range._length -= (from.length - range.bufPos);
+
+                        static if(is(typeof(range._length))) {
+                            range._length -= (from.length - range.bufPos);
+                        }
+
                         range.doBufSwap();
 
                         return from;
